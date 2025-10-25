@@ -102,27 +102,38 @@ func main() {
 		appsDir := filepath.Join(kosmoDir, "apps")
 		buildsDir := filepath.Join(kosmoDir, "builds")
 
-		appDir := filepath.Join(appsDir, appName)
-		gitDir := filepath.Join(appDir, "repo.git")
+		gitDir := filepath.Join(appsDir, appName, "repo.git")
 		buildDir := filepath.Join(buildsDir, fmt.Sprintf("%s-%d", appName, time.Now().Unix()))
-
+		
+		//TODO: fix the broken auto-create bug
 		// initialize bare repo if needed
 		if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 			fmt.Printf("initializing repo for %s...\n", appName)
-			os.MkdirAll(gitDir, 0755)
+			if err:= os.MkdirAll(gitDir, 0755); err!= nil {
+				fmt.Println("failed to create repo directory: ", err)
+				os.Exit(1)
+			}
+			// init bare repo
 			initCmd := exec.Command("git", "init", "--bare")
+			initCmd.Dir = gitDir
 			if err := initCmd.Run(); err != nil {
 				fmt.Println("failed to init git repo: ", err)
 			}
+			
+			hooksDir:= filepath.Join(gitDir, "hooks")
+			if err:= os.MkdirAll(hooksDir, 0755); err!= nil {
+				fmt.Println("failed to create hooks dir:", err)
+				os.Exit(1)
+			}
 
-			// creat post-receive-hook
+			// create post-receive-hook
 			hookPath := filepath.Join(gitDir, "hooks", "post-receive")
 			hook := fmt.Sprintf(`#!/bin/bash
 			while read oldrev newrev refname; do
 				if ["$refname" ="refs/heads/main"] || ["$refname"= "refs/heads/master"]; then
 					echo "receiving..."
 					mkdir "%s"
-					git --work-tree="%s" --git-dir="%s checkout -f
+					git --work-tree="%s" --git-dir="%s" checkout -f
 					echo "ready.."
 				fi
 			done`, buildDir, buildDir, gitDir)
