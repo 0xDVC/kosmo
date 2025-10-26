@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 func main() {
@@ -76,18 +75,26 @@ func main() {
 		os.Exit(0)
 	}
 
+	
 	if cmd == "git-receive-pack" {
+		fmt.Fprintf(os.Stderr, "[DEBUG] git-receive-pack called\n")
+		fmt.Fprintf(os.Stderr, "[DEBUG] args: %v\n", os.Args)
+	
 		if len(os.Args) < 3 {
 			fmt.Println("no repo path provided")
+			os.Exit(1)
 		}
-
+	
 		repoArg := strings.Trim(os.Args[2], "'\"")
 		repoArg = strings.TrimPrefix(repoArg, "/")
 		appName := filepath.Base(repoArg)
+	
+		fmt.Fprintf(os.Stderr, "[DEBUG] parsed app name: %s\n", appName)
+	
 		if appName == "" || appName == "." {
 			appName = "myapp"
 		}
-
+	
 		// get dir for .kosmo(local/var)
 		cwd, _ := os.Getwd()
 		localKosmo := filepath.Join(cwd, ".kosmo")
@@ -95,62 +102,90 @@ func main() {
 		kosmoDir := ""
 		if _, err := os.Stat(localKosmo); err == nil {
 			kosmoDir = localKosmo
+			fmt.Fprintf(os.Stderr, "[DEBUG] using local kosmo: %s\n", kosmoDir)
 		} else {
 			kosmoDir = globalKosmo
+			fmt.Fprintf(os.Stderr, "[DEBUG] using global kosmo: %s\n", kosmoDir)
 		}
-
+	
 		appsDir := filepath.Join(kosmoDir, "apps")
 		buildsDir := filepath.Join(kosmoDir, "builds")
-
 		gitDir := filepath.Join(appsDir, appName, "repo.git")
-		buildDir := filepath.Join(buildsDir, fmt.Sprintf("%s-%d", appName, time.Now().Unix()))
-		
-		//TODO: fix the broken auto-create bug
+	
+		fmt.Fprintf(os.Stderr, "[DEBUG] git dir: %s\n", gitDir)
+		fmt.Fprintf(os.Stderr, "[DEBUG] checking if repo exists...\n")
+	
 		// initialize bare repo if needed
 		if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "[DEBUG] repo doesn't exist, creating...\n")
 			fmt.Printf("initializing repo for %s...\n", appName)
-			if err:= os.MkdirAll(gitDir, 0755); err!= nil {
+		
+			if err := os.MkdirAll(gitDir, 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "[DEBUG] failed to create dir: %v\n", err)
 				fmt.Println("failed to create repo directory: ", err)
 				os.Exit(1)
 			}
+		
+			fmt.Fprintf(os.Stderr, "[DEBUG] created dir, running git init --bare\n")
+		
 			// init bare repo
 			initCmd := exec.Command("git", "init", "--bare")
 			initCmd.Dir = gitDir
 			if err := initCmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "[DEBUG] git init failed: %v\n", err)
 				fmt.Println("failed to init git repo: ", err)
+				os.Exit(1)
 			}
-			
-			hooksDir:= filepath.Join(gitDir, "hooks")
-			if err:= os.MkdirAll(hooksDir, 0755); err!= nil {
+		
+			fmt.Fprintf(os.Stderr, "[DEBUG] git init success\n")
+		
+			hooksDir := filepath.Join(gitDir, "hooks")
+			if err := os.MkdirAll(hooksDir, 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "[DEBUG] failed to create hooks dir: %v\n", err)
 				fmt.Println("failed to create hooks dir:", err)
 				os.Exit(1)
 			}
-
+		
 			// create post-receive-hook
 			hookPath := filepath.Join(gitDir, "hooks", "post-receive")
 			hook := fmt.Sprintf(`#!/bin/bash
+			set -e
 			while read oldrev newrev refname; do
-				if ["$refname" ="refs/heads/main"] || ["$refname"= "refs/heads/master"]; then
+			if [ "$refname" = "refs/heads/main" ] || [ "$refname" = "refs/heads/master" ]; then
 					echo "receiving..."
-					mkdir "%s"
-					git --work-tree="%s" --git-dir="%s" checkout -f
-					echo "ready.."
+		
+					BUILD_DIR="%s/%s-$(date +%%s)"
+					mkdir -p "$BUILD_DIR"
+					git --work-tree="$BUILD_DIR" --git-dir="%s" checkout -f "$refname"
+		
+					echo "ready at: $BUILD_DIR"
 				fi
-			done`, buildDir, buildDir, gitDir)
-
+			done
+			`, buildsDir, appName, gitDir)
+		
 			os.WriteFile(hookPath, []byte(hook), 0755)
+			fmt.Fprintf(os.Stderr, "[DEBUG] created post-receive hook\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "[DEBUG] repo exists, skipping creation\n")
 		}
-		//init git-receive-pack so git can push
+		
+		fmt.Fprintf(os.Stderr, "[DEBUG] running git-receive-pack %s\n", gitDir)
+	
+		// init git-receive-pack so git can push
 		cmd := exec.Command("git-receive-pack", gitDir)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "[DEBUG] git-receive-pack error: %v\n", err)
 			fmt.Println("git-receive-pack failed: ", err)
+			os.Exit(1)
 		}
+	
+		fmt.Fprintf(os.Stderr, "[DEBUG] git-receive-pack completed\n")
 		os.Exit(0)
 	}
 
-	fmt.Printf("kosmo: unknwon command '%s'\n", cmd)
+	fmt.Printf("kosmo: unknown command '%s'\n", cmd)
 	os.Exit(1)
 }
