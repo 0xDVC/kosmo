@@ -3,13 +3,20 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"time"
 )
 
 func main() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8081"
+	}
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "hello from kosmo!\n")
+		fmt.Fprintf(w, "Hello from kosmo-deployed app! Time: %s\n", time.Now().Format(time.RFC3339))
 	})
 
-	fmt.Println("starting app on port 3000...")
-	http.ListenAndServe(":3000", nil)
+	fmt.Printf("Sample app starting on :%s\n", port)
+	http.ListenAndServe(":"+port, nil)
 }

@@ -1,16 +1,48 @@
 # kosmo
+
 yet another deployment tool. my vision is a self-hosted tool with no vendor lockin. absolute ownership of your infra. i love some existent solutions.
 
 but this is a rabbit-hole project. a frying pan to fire situation.
 
-## issues
--- automated bare repo creation doesn't work by just using git
-i designed it to a be a push from client to server approach with git to start with.
-was trying to iterate to automate repo creation on server and then a git push from client would then push code to server.
-interestingly, git can't execute shell script with its hooks for custom actions like auto create bare repo. it can only do that after a git repo is initialized. hooks only work once a repo exists.
-so i can't auto-create a repo out of nothing with a hook. creating a repo just to auto create repos would introduce overheads with branch management for each app that is deployed, might work for single apps. not sure multi apps would work.
-maybe explore later??
-    
-    -- solution??
+## current approach
 
+http-based deployment. no ssh, no git. client sends tarball over http, server builds and runs.
+-- uses ed25519 signatures. server gives you a token, you sign requests with it.
+-- client tarballs code, streams to server, server builds with `go build`, runs process.
+-- achieve zero-downtime with blue-green deployment and health checks.
+-- one server handles all apps for now, each gets its own port.
+
+## quick start
+
+### 1. server Setup
+```bash
+# get binany from code 
+GOOS=<os> GOARCH=<arch> go build
+
+# export binary to server and generate server keypair and get KOSMO-token
+./kosmo setup
+
+# start the server
+./kosmo start --port 8080
+```
+
+### 2. deploy apps
+```bash
+# generate binary for client(i use darwin)
+GOOS=<os> GOARCH=<arch> go build
+
+# login once
+./kosmo login --server http://<server-ip/url>:8080 --key KOSMO-XXXX
+
+# in your app directory
+./kosmo init
+./kosmo deploy
+```
+## commands
+- `kosmo setup` - generate server keypair
+- `kosmo start` - start server
+- `kosmo login` - authenticate with server
+- `kosmo init` - initialize project
+- `kosmo deploy` - deploy app
+```
 
