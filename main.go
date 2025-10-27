@@ -18,6 +18,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func main() {
@@ -86,6 +88,7 @@ func main() {
 
 	// kosmo start --port 8080
 	if cmd == "start" {
+		fmt.Fprintf(os.Stderr, "DEBUG: starting kosmo server\n")
 		startPort := 8080
 		if len(os.Args) > 2 {
 			for i := 2; i < len(os.Args); i++ {
@@ -95,23 +98,138 @@ func main() {
 			}
 		}
 
+		pidFile := getPIDFile()
+		fmt.Fprintf(os.Stderr, "DEBUG: checking for existing process\n")
+		// check if already running
+		if pid := readPID(pidFile); pid > 0 {
+			if isProcessRunning(pid) {
+				fmt.Printf("kosmo is already running (PID: %d)\n", pid)
+				os.Exit(0)
+			}
+		}
+
+		fmt.Fprintf(os.Stderr, "DEBUG: KOSMO_DAEMON=%s\n", os.Getenv("KOSMO_DAEMON"))
+		// fork and detach
+		if os.Getenv("KOSMO_DAEMON") == "" {
+			fmt.Fprintf(os.Stderr, "DEBUG: daemonizing\n")
+			if err := daemonize(); err != nil {
+				fmt.Printf("failed to daemonize: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "DEBUG: running in foreground mode\n")
+
+		//TODO: check if we are in a container by checking the environment variables, new rabbit hole
+		// redirect stdio to log file [only for daemon process]
+		fmt.Fprintf(os.Stderr, "DEBUG: checking stdin\n")
+		if stat, err := os.Stdin.Stat(); err == nil {
+			if (stat.Mode() & os.ModeCharDevice) != 0 {
+				// we have a TTY, redirect to log file
+				fmt.Fprintf(os.Stderr, "DEBUG: redirecting stdio\n")
+				setupDaemonStdio()
+			} else {
+				fmt.Fprintf(os.Stderr, "DEBUG: no TTY, keeping stdout/stderr\n")
+			}
+			// no TTY = container, keep stdout/stderr for docker logs
+		} else {
+			fmt.Fprintf(os.Stderr, "DEBUG: stdin stat error: %v\n", err)
+		}
+
 		// find available port
+		fmt.Fprintf(os.Stderr, "DEBUG: finding port\n")
 		port := findAvailablePort(startPort)
 		if port != startPort {
 			fmt.Printf("port %d in use, using %d instead\n", startPort, port)
 		}
 
 		// load state from disk
+		fmt.Fprintf(os.Stderr, "DEBUG: loading state\n")
 		loadState()
 
-		fmt.Printf("kosmo server running on port %d\n", port)
+		// write PID file
+		fmt.Fprintf(os.Stderr, "DEBUG: writing PID file\n")
+		if err := writePID(pidFile, os.Getpid()); err != nil {
+			fmt.Printf("failed to write PID file: %v\n", err)
+		}
+
+		fmt.Printf("kosmo server running on port %d (PID: %d)\n", port, os.Getpid())
 		fmt.Println("ready for deployments...")
 
 		http.HandleFunc("/deploy", handleDeploy)
 
+		fmt.Printf("starting HTTP server on :%d\n", port)
+		fmt.Fprintf(os.Stderr, "DEBUG: about to start ListenAndServe\n")
+		os.Stderr.Sync()
+		os.Stdout.Sync()
+
+		fmt.Fprintf(os.Stderr, "DEBUG: calling ListenAndServe on :%d\n", port)
 		if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
-			fmt.Println("server failed:", err)
+			fmt.Printf("server failed: %v\n", err)
+			os.Remove(pidFile)
 			os.Exit(1)
+		}
+	}
+
+	// kosmo stop
+	if cmd == "stop" {
+		pidFile := getPIDFile()
+		pid := readPID(pidFile)
+		if pid == 0 {
+			fmt.Println("kosmo is not running")
+			os.Exit(0)
+		}
+
+		if !isProcessRunning(pid) {
+			fmt.Println("kosmo is not running (stale PID file)")
+			os.Remove(pidFile)
+			os.Exit(0)
+		}
+
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			fmt.Printf("failed to find process: %v\n", err)
+			os.Exit(1)
+		}
+
+		if err := proc.Signal(syscall.SIGTERM); err != nil {
+			fmt.Printf("failed to stop kosmo: %v\n", err)
+			os.Exit(1)
+		}
+
+		// wait for graceful shutdown (works on both Linux and macOS)
+		for i := 0; i < 10; i++ {
+			if !isProcessRunning(pid) {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		// if still running, force kill
+		if isProcessRunning(pid) {
+			proc.Kill()
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		os.Remove(pidFile)
+		fmt.Println("kosmo stopped")
+		os.Exit(0)
+	}
+
+	// kosmo status
+	if cmd == "status" {
+		pidFile := getPIDFile()
+		pid := readPID(pidFile)
+		if pid == 0 {
+			fmt.Println("kosmo is not running")
+			os.Exit(0)
+		}
+
+		if isProcessRunning(pid) {
+			fmt.Printf("kosmo is running: (pid: %d)\n", pid)
+		} else {
+			fmt.Println("kosmo is not running")
+			os.Remove(pidFile)
 		}
 		os.Exit(0)
 	}
@@ -124,20 +242,17 @@ func main() {
 				server = os.Args[i+1]
 			}
 		}
-
 		if server == "" {
 			fmt.Println("missing --server <url>")
 			os.Exit(1)
 		}
-
 		cwd, err := os.Getwd()
 		if err != nil {
 			fmt.Println("failed to get cwd:", err)
 			os.Exit(1)
 		}
 		app := filepath.Base(cwd)
-
-		fmt.Println("preparing deployment for", app, "...")
+		fmt.Printf("preparing deployment for: %s ...\n", app)
 
 		// load client config
 		home, _ := os.UserHomeDir()
@@ -258,7 +373,7 @@ func loadState() {
 			continue
 		}
 
-		// check if process is actually running
+		// check if process is actually running (works on Linux and macOS)
 		if proc.Signal(syscall.Signal(0)) != nil {
 			continue // process is dead
 		}
@@ -329,7 +444,7 @@ func findAvailablePort(startPort int) int {
 }
 
 func waitForHealth(url string, timeoutSeconds int) bool {
-	for range timeoutSeconds {
+	for i := 0; i < timeoutSeconds; i++ {
 		resp, err := http.Get(url)
 		if err == nil && resp.StatusCode == 200 {
 			resp.Body.Close()
@@ -341,7 +456,7 @@ func waitForHealth(url string, timeoutSeconds int) bool {
 }
 
 func waitForPort(port int, timeoutSeconds int) bool {
-	for range timeoutSeconds {
+	for i := 0; i < timeoutSeconds; i++ {
 		conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
 		if err == nil {
 			conn.Close()
@@ -427,7 +542,7 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "signature verification failed", http.StatusForbidden)
 		return
 	}
-	fmt.Println("authenticated deploy from client:", pubB64[:16], "...")
+	fmt.Printf("authenticated deploy from client: %s ...\n", pubB64[:16])
 
 	// create build directory
 	kosmoDir := ".kosmo"
@@ -471,7 +586,7 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "failed to create directory: "+err.Error(), 500)
 				return
 			}
-			f,err := os.Create(target)
+			f, err := os.Create(target)
 			if err != nil {
 				http.Error(w, "create file error: "+err.Error(), 500)
 				return
@@ -488,7 +603,7 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	fmt.Println("extract done:", appBuildDir)
+	fmt.Printf("extract done: %s\n", appBuildDir)
 
 	// build and run the app
 	buildCmd := exec.Command("go", "build", "-o", "app")
@@ -498,6 +613,7 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Println("building app...")
 	if err := buildCmd.Run(); err != nil {
+		fmt.Printf("build failed: %v\n", err)
 		http.Error(w, "build failed: "+err.Error(), 500)
 		return
 	}
@@ -540,6 +656,7 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("health endpoint not available, checking port...")
 		if !waitForPort(newPort, 5) {
 			runCmd.Process.Kill()
+			fmt.Println("app failed to start")
 			http.Error(w, "app failed to start", 500)
 			return
 		}
@@ -574,4 +691,135 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 	url := fmt.Sprintf("http://%s:%d", host, newPort)
 
 	fmt.Fprintf(w, "deployed to %s (version %s)\n", url, version)
+}
+
+// daemonization helpers
+func getPIDFile() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Fallback to current directory if can't get home
+		return filepath.Join(".kosmo", "kosmo.pid")
+	}
+	return filepath.Join(home, ".kosmo", "kosmo.pid")
+}
+
+func getLogFile() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Fallback to current directory if can't get home
+		logDir := ".kosmo"
+		os.MkdirAll(logDir, 0755)
+		return filepath.Join(logDir, "kosmo.log")
+	}
+	logDir := filepath.Join(home, ".kosmo")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		// Fallback to current directory if can't create
+		return filepath.Join(".kosmo", "kosmo.log")
+	}
+	return filepath.Join(logDir, "kosmo.log")
+}
+
+func daemonize() error {
+	// Find the executable path
+	execPath, err := os.Executable()
+	if err != nil {
+		execPath = os.Args[0]
+	}
+
+	// Re-execute with KOSMO_DAEMON=1
+	cmd := exec.Command(execPath, os.Args[1:]...)
+	cmd.Env = append(os.Environ(), "KOSMO_DAEMON=1")
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid: true,
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start daemon: %v", err)
+	}
+
+	fmt.Printf("kosmo daemon started (PID: %d)\n", cmd.Process.Pid)
+	fmt.Printf("logs: %s\n", getLogFile())
+	os.Exit(0)
+
+	return nil // unreachable
+}
+
+func setupDaemonStdio() {
+	// redirect stdin to /dev/null
+	devNull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to open /dev/null: %v\n", err)
+	} else {
+		if err := unix.Dup2(int(devNull.Fd()), int(os.Stdin.Fd())); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to redirect stdin: %v\n", err)
+		}
+		devNull.Close()
+	}
+
+	// redirect stdout/stderr to log file
+	logFile := getLogFile()
+	f, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to open log file %s: %v\n", logFile, err)
+		return
+	}
+
+	if err := unix.Dup2(int(f.Fd()), int(os.Stdout.Fd())); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to redirect stdout: %v\n", err)
+		f.Close()
+		return
+	}
+
+	if err := unix.Dup2(int(f.Fd()), int(os.Stderr.Fd())); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to redirect stderr: %v\n", err)
+		f.Close()
+		return
+	}
+
+	f.Close()
+}
+
+func readPID(pidFile string) int {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+func writePID(pidFile string, pid int) error {
+	dir := filepath.Dir(pidFile)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create pid directory: %v", err)
+	}
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
+		return fmt.Errorf("failed to write pid file: %v", err)
+	}
+	return nil
+}
+
+func isProcessRunning(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+
+	// Signal 0 doesn't actually send a signal, just checks if process exists
+	// Works on both Linux and macOS
+	err = proc.Signal(syscall.Signal(0))
+	if err != nil {
+		// Process doesn't exist or we don't have permission
+		return false
+	}
+
+	// Additional check: on Unix systems, try to get process state
+	// This helps catch cases where the process exists but is zombie
+	return true
 }
