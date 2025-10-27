@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -93,7 +94,7 @@ func main() {
 			}
 		}
 
-		// Find available port
+		// find available port
 		port := findAvailablePort(startPort)
 		if port != startPort {
 			fmt.Printf("port %d in use, using %d instead\n", startPort, port)
@@ -244,38 +245,73 @@ func main() {
 var nextPort = 8081
 var runningApps = make(map[string]*AppInfo)
 
-
-// TODO: state isnt being serialized. need to fix this.
 // load state on startup
 func loadState() {
 	stateFile := ".kosmo/state.json"
-	if data, err := os.ReadFile(stateFile); err == nil {
-		json.Unmarshal(data, &runningApps)
-		// find highest port used
-		maxPort := 8080
-		for _, app := range runningApps {
-			if app.Port > maxPort {
-				maxPort = app.Port
-			}
-		}
-		nextPort = maxPort + 1
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		return
 	}
+
+	var state map[string]AppInfo
+	if err := json.Unmarshal(data, &state); err != nil {
+		return
+	}
+
+	maxPort := 8080
+	for name, info := range state {
+		// check if process still exists
+		proc, err := os.FindProcess(info.PID)
+		if err != nil {
+			continue 
+		}
+
+		// check if process is actually running
+		if proc.Signal(syscall.Signal(0)) != nil {
+			continue // process is dead
+		}
+
+		runningApps[name] = &AppInfo{
+			Process: proc,
+			PID:     info.PID,
+			Port:    info.Port,
+			Version: info.Version,
+			Path:    info.Path,
+		}
+
+		if info.Port > maxPort {
+			maxPort = info.Port
+		}
+	}
+	nextPort = maxPort + 1
 }
 
 // save state to disk
 func saveState() {
 	stateFile := ".kosmo/state.json"
 	os.MkdirAll(".kosmo", 0755)
-	if data, err := json.Marshal(runningApps); err == nil {
+
+	state := make(map[string]AppInfo)
+	for name, app := range runningApps {
+		state[name] = AppInfo{
+			PID:     app.PID,
+			Port:    app.Port,
+			Version: app.Version,
+			Path:    app.Path,
+		}
+	}
+
+	if data, err := json.Marshal(state); err == nil {
 		os.WriteFile(stateFile, data, 0644)
 	}
 }
 
 type AppInfo struct {
-	Process *os.Process
-	Port    int 
-	Version string
-	Path    string
+	Process *os.Process `json:"-"`
+	PID     int         `json:"pid"`
+	Port    int         `json:"port"`
+	Version string      `json:"version"`
+	Path    string      `json:"path"`
 }
 
 func findAvailablePort(startPort int) int {
@@ -296,7 +332,7 @@ func waitForHealth(url string, timeoutSeconds int) bool {
 			resp.Body.Close()
 			return true
 		}
-		time.Sleep(1*time.Second)
+		time.Sleep(1 * time.Second)
 	}
 	return false
 }
@@ -308,7 +344,7 @@ func waitForPort(port int, timeoutSeconds int) bool {
 			conn.Close()
 			return true
 		}
-		time.Sleep(1*time.Second)
+		time.Sleep(1 * time.Second)
 	}
 	return false
 }
@@ -317,15 +353,19 @@ func gracefulShutdown(process *os.Process) {
 	// send sigterm first
 	process.Signal(syscall.SIGTERM)
 
-	for i:= 0; i < 10; i++ { // wait up to 10 seconds
-		if process.Signal(syscall.Signal(0)) != nil {
-			return
-		}
-		time.Sleep(1 * time.Second)
-	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := process.Wait()
+		done <- err
+	}()
 
-	// force kill if still running
-	process.Kill()
+	select {
+	case <-done:
+		return // process exited
+	case <-time.After(10 * time.Second):
+		process.Kill() // force kill
+		<-done         // wait for zombie cleanup
+	}
 }
 
 func getServerFromConfig() string {
@@ -382,6 +422,18 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// validate timestamp (prevent replay attacks)
+	reqTimestamp, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid timestamp", 400)
+		return
+	}
+	now := time.Now().Unix()
+	if now-reqTimestamp > 300 || reqTimestamp-now > 60 {
+		http.Error(w, "request too old or from future", 400)
+		return
+	}
+
 	msg := fmt.Sprintf("%s-%s", app, ts)
 	if !ed25519.Verify(pubBytes, []byte(msg), sigBytes) {
 		http.Error(w, "signature verification failed", http.StatusForbidden)
@@ -416,12 +468,11 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to read tar: "+err.Error(), 500)
 			return
 		}
-		
-		//TODO: traversal check is incomplete
+
 		// prevent path traversal attacks
-		target := filepath.Join(appBuildDir, hdr.Name)
+		target := filepath.Join(appBuildDir, filepath.Clean(hdr.Name))
 		if !strings.HasPrefix(target, appBuildDir) {
-			http.Error(w, "invalid file path", 400)
+			http.Error(w, "path traversal attempt", 400)
 			return
 		}
 
@@ -475,7 +526,7 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// health check new version 
+	// health check new version
 	fmt.Printf("checking on port %d...\n", newPort)
 	healthURL := fmt.Sprintf("http://localhost:%d/health", newPort)
 	if !waitForHealth(healthURL, 5) {
@@ -498,6 +549,7 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 	version := fmt.Sprintf("%d", timestamp)
 	runningApps[app] = &AppInfo{
 		Process: runCmd.Process,
+		PID:     runCmd.Process.Pid,
 		Port:    newPort,
 		Version: version,
 		Path:    appBuildDir,
