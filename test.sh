@@ -3,18 +3,18 @@ set -euf
 
 printf "testing kosmo...\n"
 
-printf "test 1: setup creates keys\n"
+printf "setup creates keys\n"
 kosmo setup | grep -q "Kosmo setup complete" || exit 1
 [ -f ~/.kosmo/keys/server_ed25519.pub ] || exit 1
 [ -f ~/.kosmo/keys/server_ed25519 ] || exit 1
 printf "keys created\n"
 
-printf "test 2: init creates directories\n"
+printf "init creates directories\n"
 cd sample && kosmo init && cd .. || exit 1
 [ -d sample/.kosmo/builds ] || exit 1
 printf "directories created\n"
 
-printf "test 3: deploy and verify app\n"
+printf "deploy and verify app\n"
 cd sample
 
 # get server token from shared volume
@@ -41,7 +41,7 @@ if printf "%s\n" "$DEPLOY_OUTPUT" | grep -q "deployed to"; then
         exit 1
     fi
 else
-    printf "deploy failed or skipped (no server)\n"
+    printf "deploy failed)\n"
 fi
 printf "tests completed\n"
 
