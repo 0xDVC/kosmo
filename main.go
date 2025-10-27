@@ -115,25 +115,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	// kosmo rollback <app>
-	if cmd == "rollback" {
-		if len(os.Args) < 3 {
-			fmt.Println("usage: kosmo rollback <app>")
-			os.Exit(1)
-		}
-
-		app := os.Args[2]
-		server := getServerFromConfig()
-		if server == "" {
-			fmt.Println("no server configured, run 'kosmo login' first")
-			os.Exit(1)
-		}
-
-		// TODO: implement rollback logic
-		fmt.Printf("rollback for %s not implemented yet\n", app)
-		os.Exit(0)
-	}
-
 	// kosmo deploy --server http://localhost:8080
 	if cmd == "deploy" {
 		server := ""
@@ -263,7 +244,7 @@ func loadState() {
 		// check if process still exists
 		proc, err := os.FindProcess(info.PID)
 		if err != nil {
-			continue 
+			continue
 		}
 
 		// check if process is actually running
@@ -350,9 +331,10 @@ func waitForPort(port int, timeoutSeconds int) bool {
 }
 
 func gracefulShutdown(process *os.Process) {
-	// send sigterm first
+	// send kill signal first
 	process.Signal(syscall.SIGTERM)
 
+	// wait for process to exit
 	done := make(chan error, 1)
 	go func() {
 		_, err := process.Wait()
@@ -361,25 +343,11 @@ func gracefulShutdown(process *os.Process) {
 
 	select {
 	case <-done:
-		return // process exited
+		return 
 	case <-time.After(10 * time.Second):
-		process.Kill() // force kill
-		<-done         // wait for zombie cleanup
+		process.Kill()
+		<-done 
 	}
-}
-
-func getServerFromConfig() string {
-	home, _ := os.UserHomeDir()
-	cfgPath := filepath.Join(home, ".kosmo", "config.json")
-	cfgData, err := os.ReadFile(cfgPath)
-	if err != nil {
-		return ""
-	}
-	var cfg Config
-	if err := json.Unmarshal(cfgData, &cfg); err != nil {
-		return ""
-	}
-	return cfg.ServerURL
 }
 
 func handleDeploy(w http.ResponseWriter, r *http.Request) {
