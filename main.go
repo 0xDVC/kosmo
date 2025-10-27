@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -148,7 +149,10 @@ func main() {
 		}
 
 		var cfg Config
-		json.Unmarshal(cfgData, &cfg)
+		if err := json.Unmarshal(cfgData, &cfg); err != nil {
+			fmt.Println("failed to parse config:", err)
+			os.Exit(1)
+		}
 
 		// create tarball
 		pr, pw := io.Pipe()
@@ -195,7 +199,11 @@ func main() {
 		// sign the request
 		timestamp := time.Now().Unix()
 		message := fmt.Sprintf("%s-%d", app, timestamp)
-		privBytes, _ := base64.StdEncoding.DecodeString(cfg.ClientPriv)
+		privBytes, err := base64.StdEncoding.DecodeString(cfg.ClientPriv)
+		if err != nil {
+			fmt.Println("failed to decode private key:", err)
+			os.Exit(1)
+		}
 		sig := ed25519.Sign(privBytes, []byte(message))
 
 		// create authenticated request
@@ -223,8 +231,11 @@ func main() {
 	os.Exit(1)
 }
 
-var nextPort = 8081
-var runningApps = make(map[string]*AppInfo)
+var (
+	nextPort    = 8081
+	runningApps = make(map[string]*AppInfo)
+	appsMutex   sync.RWMutex
+)
 
 // load state on startup
 func loadState() {
@@ -269,9 +280,7 @@ func loadState() {
 
 // save state to disk
 func saveState() {
-	stateFile := ".kosmo/state.json"
-	os.MkdirAll(".kosmo", 0755)
-
+	appsMutex.RLock()
 	state := make(map[string]AppInfo)
 	for name, app := range runningApps {
 		state[name] = AppInfo{
@@ -281,9 +290,22 @@ func saveState() {
 			Path:    app.Path,
 		}
 	}
+	appsMutex.RUnlock()
 
-	if data, err := json.Marshal(state); err == nil {
-		os.WriteFile(stateFile, data, 0644)
+	stateFile := ".kosmo/state.json"
+	if err := os.MkdirAll(".kosmo", 0755); err != nil {
+		fmt.Printf("failed to create .kosmo dir: %v\n", err)
+		return
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		fmt.Printf("failed to marshal state: %v\n", err)
+		return
+	}
+
+	if err := os.WriteFile(stateFile, data, 0644); err != nil {
+		fmt.Printf("failed to write state: %v\n", err)
 	}
 }
 
@@ -307,7 +329,7 @@ func findAvailablePort(startPort int) int {
 }
 
 func waitForHealth(url string, timeoutSeconds int) bool {
-	for i := 0; i < timeoutSeconds; i++ {
+	for range timeoutSeconds {
 		resp, err := http.Get(url)
 		if err == nil && resp.StatusCode == 200 {
 			resp.Body.Close()
@@ -319,7 +341,7 @@ func waitForHealth(url string, timeoutSeconds int) bool {
 }
 
 func waitForPort(port int, timeoutSeconds int) bool {
-	for i := 0; i < timeoutSeconds; i++ {
+	for range timeoutSeconds {
 		conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
 		if err == nil {
 			conn.Close()
@@ -343,10 +365,10 @@ func gracefulShutdown(process *os.Process) {
 
 	select {
 	case <-done:
-		return 
+		return
 	case <-time.After(10 * time.Second):
 		process.Kill()
-		<-done 
+		<-done
 	}
 }
 
@@ -362,7 +384,6 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing auth headers", http.StatusUnauthorized)
 		return
 	}
-
 	app := r.URL.Query().Get("app")
 	if app == "" {
 		app = "app"
@@ -383,7 +404,6 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid pubkey", 400)
 		return
 	}
-
 	sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
 	if err != nil {
 		http.Error(w, "invalid signature", 400)
@@ -407,7 +427,6 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "signature verification failed", http.StatusForbidden)
 		return
 	}
-
 	fmt.Println("authenticated deploy from client:", pubB64[:16], "...")
 
 	// create build directory
@@ -448,14 +467,24 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		case tar.TypeDir:
 			os.MkdirAll(target, os.FileMode(hdr.Mode))
 		case tar.TypeReg:
-			os.MkdirAll(filepath.Dir(target), 0755)
-			f, err := os.Create(target)
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				http.Error(w, "failed to create directory: "+err.Error(), 500)
+				return
+			}
+			f,err := os.Create(target)
 			if err != nil {
 				http.Error(w, "create file error: "+err.Error(), 500)
 				return
 			}
-			io.Copy(f, tr)
-			f.Close()
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				http.Error(w, "failed to write file: "+err.Error(), 500)
+				return
+			}
+			if err := f.Close(); err != nil {
+				http.Error(w, "failed to close file: "+err.Error(), 500)
+				return
+			}
 		}
 	}
 
@@ -475,11 +504,20 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Println("build done, starting app...")
 
+	// verify binary exists
+	binaryPath := filepath.Join(appBuildDir, "app")
+	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+		http.Error(w, "binary not found after build", 500)
+		return
+	}
+
 	// blue-green deployment: start new version first
+	appsMutex.Lock()
 	newPort := nextPort
 	nextPort++
+	appsMutex.Unlock()
 
-	runCmd := exec.Command(filepath.Join(appBuildDir, "app"))
+	runCmd := exec.Command(binaryPath)
 	runCmd.Dir = appBuildDir
 	runCmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", newPort))
 	runCmd.Stdout = os.Stdout
@@ -508,12 +546,8 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// switch traffic
-	if oldApp, exists := runningApps[app]; exists {
-		fmt.Printf("switching from port %d to %d\n", oldApp.Port, newPort)
-		gracefulShutdown(oldApp.Process)
-	}
-
-	// store new version
+	appsMutex.Lock()
+	oldApp, exists := runningApps[app]
 	version := fmt.Sprintf("%d", timestamp)
 	runningApps[app] = &AppInfo{
 		Process: runCmd.Process,
@@ -521,6 +555,12 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		Port:    newPort,
 		Version: version,
 		Path:    appBuildDir,
+	}
+	appsMutex.Unlock()
+
+	if exists {
+		fmt.Printf("switching from port %d to %d\n", oldApp.Port, newPort)
+		gracefulShutdown(oldApp.Process)
 	}
 
 	// save state to disk
