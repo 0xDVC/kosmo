@@ -504,18 +504,6 @@ func waitForHealth(url string, timeoutSeconds int) bool {
 	return false
 }
 
-func waitForPort(port int, timeoutSeconds int) bool {
-	for i := 0; i < timeoutSeconds; i++ {
-		conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
-		if err == nil {
-			conn.Close()
-			return true
-		}
-		time.Sleep(1 * time.Second)
-	}
-	return false
-}
-
 func gracefulShutdown(process *os.Process) {
 	// send kill signal first
 	process.Signal(syscall.SIGTERM)
@@ -673,23 +661,31 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// check if old version exists before health check
+	appsMutex.Lock()
+	oldApp, exists := runningApps[app]
+	appsMutex.Unlock()
+
 	// health check new version
 	fmt.Printf("checking on port %d...\n", newPort)
 	healthURL := fmt.Sprintf("http://localhost:%d/health", newPort)
-	if !waitForHealth(healthURL, 5) {
-		// fallback to port check
-		fmt.Println("health endpoint not available, checking port...")
-		if !waitForPort(newPort, 5) {
-			runCmd.Process.Kill()
-			fmt.Println("app failed to start")
-			http.Error(w, "app failed to start", 500)
+	if !waitForHealth(healthURL, 30) {
+		runCmd.Process.Kill()
+
+		// Keep old version running if it exists
+		if exists {
+			fmt.Println("new version failed health check, keeping old version")
+			http.Error(w, "deployment failed: health check timeout", 500)
 			return
 		}
+
+		fmt.Println("app failed health check")
+		http.Error(w, "deployment failed: no /health endpoint responding", 500)
+		return
 	}
 
 	// switch traffic
 	appsMutex.Lock()
-	oldApp, exists := runningApps[app]
 	version := fmt.Sprintf("%d", timestamp)
 	runningApps[app] = &AppInfo{
 		Process: runCmd.Process,
@@ -718,11 +714,10 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "deployed to %s (version %s)\n", url, version)
 }
 
-// daemonization helpers
+//daemonization helpers
 func getPIDFile() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		// Fallback to current directory if can't get home
 		return filepath.Join(".kosmo", "kosmo.pid")
 	}
 	return filepath.Join(home, ".kosmo", "kosmo.pid")
