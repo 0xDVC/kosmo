@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -22,335 +23,383 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func main() {
-	// welcome, welcome adongo
-	if len(os.Args) == 1 {
-		fmt.Println("welcome to kosmo! your dev first, self-hosted deployment tool")
-		os.Exit(0)
-	}
-
-	if len(os.Args) < 2 {
-		fmt.Println("kosmo: missing command")
-		os.Exit(1)
-	}
-
-	cmd := os.Args[1]
-
-	if cmd == "setup" {
-		kosmoSetup()
-		os.Exit(0)
-	}
-
-	if cmd == "login" {
-		if len(os.Args) < 4 {
-			fmt.Println("usage: kosmo login --server <url> --key <KOSMO-key>")
-			os.Exit(1)
-		}
-
-		var serverURL, serverKey string
-		for i, arg := range os.Args {
-			if arg == "--server" && i+1 < len(os.Args) {
-				serverURL = os.Args[i+1]
-			}
-			if arg == "--key" && i+1 < len(os.Args) {
-				serverKey = os.Args[i+1]
-			}
-		}
-
-		if serverURL == "" || serverKey == "" {
-			fmt.Println("missing required args: --server and --key")
-			os.Exit(1)
-		}
-
-		kosmoLogin(serverURL, serverKey)
-		os.Exit(0)
-	}
-
-	// initialize kosmo
-	if cmd == "init" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			fmt.Println("failed to get cwd:", err)
-			os.Exit(1)
-		}
-
-		kosmoDir := filepath.Join(cwd, ".kosmo")
-		buildsDir := filepath.Join(kosmoDir, "builds")
-
-		fmt.Println("initializing kosmo...")
-
-		os.MkdirAll(buildsDir, 0755)
-
-		fmt.Println("kosmo initialized.")
-		fmt.Println("-- run 'kosmo deploy --server http://<ip>:8080'")
-		os.Exit(0)
-	}
-
-	// kosmo start --port 8080
-	if cmd == "start" {
-		fmt.Fprintf(os.Stderr, "DEBUG: starting kosmo server\n")
-		startPort := 8080
-		if len(os.Args) > 2 {
-			for i := 2; i < len(os.Args); i++ {
-				if (os.Args[i] == "--port" || os.Args[i] == "-p") && i+1 < len(os.Args) {
-					fmt.Sscanf(os.Args[i+1], "%d", &startPort)
-				}
-			}
-		}
-
-		pidFile := getPIDFile()
-		fmt.Fprintf(os.Stderr, "DEBUG: checking for existing process\n")
-		// check if already running
-		if pid := readPID(pidFile); pid > 0 {
-			if isProcessRunning(pid) {
-				fmt.Printf("kosmo is already running (PID: %d)\n", pid)
-				os.Exit(0)
-			}
-		}
-
-		fmt.Fprintf(os.Stderr, "DEBUG: KOSMO_DAEMON=%s\n", os.Getenv("KOSMO_DAEMON"))
-		// fork and detach
-		if os.Getenv("KOSMO_DAEMON") == "" {
-			fmt.Fprintf(os.Stderr, "DEBUG: daemonizing\n")
-			if err := daemonize(); err != nil {
-				fmt.Printf("failed to daemonize: %v\n", err)
-				os.Exit(1)
-			}
-			os.Exit(0)
-		}
-		fmt.Fprintf(os.Stderr, "DEBUG: running in foreground mode\n")
-
-		//TODO: check if we are in a container by checking the environment variables, new rabbit hole
-		// redirect stdio to log file [only for daemon process]
-		fmt.Fprintf(os.Stderr, "DEBUG: checking stdin\n")
-		if stat, err := os.Stdin.Stat(); err == nil {
-			if (stat.Mode() & os.ModeCharDevice) != 0 {
-				// we have a TTY, redirect to log file
-				fmt.Fprintf(os.Stderr, "DEBUG: redirecting stdio\n")
-				setupDaemonStdio()
-			} else {
-				fmt.Fprintf(os.Stderr, "DEBUG: no TTY, keeping stdout/stderr\n")
-			}
-			// no TTY = container, keep stdout/stderr for docker logs
-		} else {
-			fmt.Fprintf(os.Stderr, "DEBUG: stdin stat error: %v\n", err)
-		}
-
-		// find available port
-		fmt.Fprintf(os.Stderr, "DEBUG: finding port\n")
-		port := findAvailablePort(startPort)
-		if port != startPort {
-			fmt.Printf("port %d in use, using %d instead\n", startPort, port)
-		}
-
-		// load state from disk
-		fmt.Fprintf(os.Stderr, "DEBUG: loading state\n")
-		loadState()
-
-		// write PID file
-		fmt.Fprintf(os.Stderr, "DEBUG: writing PID file\n")
-		if err := writePID(pidFile, os.Getpid()); err != nil {
-			fmt.Printf("failed to write PID file: %v\n", err)
-		}
-
-		fmt.Printf("kosmo server running on port %d (PID: %d)\n", port, os.Getpid())
-		fmt.Println("ready for deployments...")
-
-		http.HandleFunc("/deploy", handleDeploy)
-
-		fmt.Printf("starting HTTP server on :%d\n", port)
-		fmt.Fprintf(os.Stderr, "DEBUG: about to start ListenAndServe\n")
-		os.Stderr.Sync()
-		os.Stdout.Sync()
-
-		fmt.Fprintf(os.Stderr, "DEBUG: calling ListenAndServe on :%d\n", port)
-		if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
-			fmt.Printf("server failed: %v\n", err)
-			os.Remove(pidFile)
-			os.Exit(1)
-		}
-	}
-
-	// kosmo stop
-	if cmd == "stop" {
-		pidFile := getPIDFile()
-		pid := readPID(pidFile)
-		if pid == 0 {
-			fmt.Println("kosmo is not running")
-			os.Exit(0)
-		}
-
-		if !isProcessRunning(pid) {
-			fmt.Println("kosmo is not running (stale PID file)")
-			os.Remove(pidFile)
-			os.Exit(0)
-		}
-
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			fmt.Printf("failed to find process: %v\n", err)
-			os.Exit(1)
-		}
-
-		if err := proc.Signal(syscall.SIGTERM); err != nil {
-			fmt.Printf("failed to stop kosmo: %v\n", err)
-			os.Exit(1)
-		}
-
-		// wait for graceful shutdown (works on both Linux and macOS)
-		for i := 0; i < 10; i++ {
-			if !isProcessRunning(pid) {
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-
-		// if still running, force kill
-		if isProcessRunning(pid) {
-			proc.Kill()
-			time.Sleep(500 * time.Millisecond)
-		}
-
-		os.Remove(pidFile)
-		fmt.Println("kosmo stopped")
-		os.Exit(0)
-	}
-
-	// kosmo status
-	if cmd == "status" {
-		pidFile := getPIDFile()
-		pid := readPID(pidFile)
-		if pid == 0 {
-			fmt.Println("kosmo is not running")
-			os.Exit(0)
-		}
-
-		if isProcessRunning(pid) {
-			fmt.Printf("kosmo is running: (pid: %d)\n", pid)
-		} else {
-			fmt.Println("kosmo is not running")
-			os.Remove(pidFile)
-		}
-		os.Exit(0)
-	}
-
-	// kosmo deploy --server http://localhost:8080
-	if cmd == "deploy" {
-		server := ""
-		for i, arg := range os.Args {
-			if (arg == "--server" || arg == "-s") && i+1 < len(os.Args) {
-				server = os.Args[i+1]
-			}
-		}
-		if server == "" {
-			fmt.Println("missing --server <url>")
-			os.Exit(1)
-		}
-		cwd, err := os.Getwd()
-		if err != nil {
-			fmt.Println("failed to get cwd:", err)
-			os.Exit(1)
-		}
-		app := filepath.Base(cwd)
-		fmt.Printf("preparing deployment for: %s ...\n", app)
-
-		// load client config
-		home, _ := os.UserHomeDir()
-		cfgPath := filepath.Join(home, ".kosmo", "config.json")
-		cfgData, err := os.ReadFile(cfgPath)
-		if err != nil {
-			fmt.Println("missing kosmo config, run `kosmo login` first")
-			os.Exit(1)
-		}
-
-		var cfg Config
-		if err := json.Unmarshal(cfgData, &cfg); err != nil {
-			fmt.Println("failed to parse config:", err)
-			os.Exit(1)
-		}
-
-		// create tarball
-		pr, pw := io.Pipe()
-		go func() {
-			gzw := gzip.NewWriter(pw)
-			tw := tar.NewWriter(gzw)
-
-			filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					return err
-				}
-
-				// skip .git and .kosmo dirs
-				if strings.Contains(path, ".git") || strings.Contains(path, ".kosmo") {
-					if info.IsDir() {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-
-				hdr, err := tar.FileInfoHeader(info, "")
-				if err != nil {
-					return err
-				}
-				hdr.Name = path
-				tw.WriteHeader(hdr)
-
-				if !info.IsDir() {
-					f, err := os.Open(path)
-					if err != nil {
-						return err
-					}
-					io.Copy(tw, f)
-					f.Close()
-				}
-				return nil
-			})
-
-			tw.Close()
-			gzw.Close()
-			pw.Close()
-		}()
-
-		// sign the request
-		timestamp := time.Now().Unix()
-		message := fmt.Sprintf("%s-%d", app, timestamp)
-		privBytes, err := base64.StdEncoding.DecodeString(cfg.ClientPriv)
-		if err != nil {
-			fmt.Println("failed to decode private key:", err)
-			os.Exit(1)
-		}
-		sig := ed25519.Sign(privBytes, []byte(message))
-
-		// create authenticated request
-		req, err := http.NewRequest("POST", fmt.Sprintf("%s/deploy?app=%s", server, app), pr)
-		if err != nil {
-			fmt.Println("failed to create request:", err)
-			os.Exit(1)
-		}
-		req.Header.Set("Content-Type", "application/gzip")
-		req.Header.Set("X-Kosmo-Pubkey", cfg.ClientPub)
-		req.Header.Set("X-Kosmo-Signature", base64.StdEncoding.EncodeToString(sig))
-		req.Header.Set("X-Kosmo-Timestamp", fmt.Sprintf("%d", timestamp))
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			fmt.Println("deploy failed:", err)
-			os.Exit(1)
-		}
-		defer resp.Body.Close()
-		io.Copy(os.Stdout, resp.Body)
-		os.Exit(0)
-	}
-
-	fmt.Printf("kosmo: unknown command '%s'\n", cmd)
-	os.Exit(1)
-}
-
 var (
 	nextPort    = 8081
 	runningApps = make(map[string]*AppInfo)
 	appsMutex   sync.RWMutex
 )
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Println("welcome to kosmo! your dev first, self-hosted deployment tool")
+		fmt.Println("usage: kosmo <command>")
+		os.Exit(0)
+	}
+
+	cmd := os.Args[1]
+	args := os.Args[2:]
+
+	switch cmd {
+	case "setup":
+		kosmoSetup()
+	case "add-client":
+		handleAddClient(args)
+	case "remove-client":
+		handleRemoveClient(args)
+	case "list-clients":
+		handleListClients()
+	case "login":
+		handleLogin(args)
+	case "init":
+		handleInit()
+	case "start":
+		handleStart(args)
+	case "stop":
+		handleStop()
+	case "status":
+		handleStatus()
+	case "deploy":
+		handleDeploy(args)
+	default:
+		fmt.Printf("kosmo: unknown command '%s'\n", cmd)
+		os.Exit(1)
+	}
+}
+
+func handleAddClient(args []string) {
+	pubkey, _ := parseArgs(args, "--pubkey", "")
+	if pubkey == "" {
+		fmt.Println("usage: kosmo add-client --pubkey <pubkey>")
+		os.Exit(1)
+	}
+
+	if err := addClient(pubkey); err != nil {
+		fmt.Printf("failed to add client: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("client %s added successfully\n", pubkey[:16]+"...")
+}
+
+func handleRemoveClient(args []string) {
+	pubkey, _ := parseArgs(args, "--pubkey", "")
+	if pubkey == "" {
+		fmt.Println("usage: kosmo remove-client --pubkey <pubkey>")
+		os.Exit(1)
+	}
+
+	if err := removeClient(pubkey); err != nil {
+		fmt.Printf("failed to remove client: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("client removed successfully")
+}
+
+func handleListClients() {
+	clients, err := listClients()
+	if err != nil {
+		fmt.Printf("failed to list clients: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(clients) == 0 {
+		fmt.Println("no clients configured")
+		return
+	}
+
+	fmt.Println("Allowed clients:")
+	for _, pubkey := range clients {
+		fmt.Printf("  %s\n", pubkey[:16]+"...")
+	}
+}
+
+func handleLogin(args []string) {
+	serverURL, serverKey := parseArgs(args, "--server", "--key")
+	if serverURL == "" || serverKey == "" {
+		fmt.Println("usage: kosmo login --server <url> --key <KOSMO-key>")
+		os.Exit(1)
+	}
+
+	kosmoLogin(serverURL, serverKey)
+}
+
+func handleInit() {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Printf("failed to get cwd: %v\n", err)
+		os.Exit(1)
+	}
+
+	kosmoDir := filepath.Join(cwd, ".kosmo")
+	buildsDir := filepath.Join(kosmoDir, "builds")
+
+	fmt.Println("initializing kosmo...")
+	os.MkdirAll(buildsDir, 0755)
+
+	fmt.Println("kosmo initialized.")
+	fmt.Println("-- run 'kosmo deploy --server http://<ip>:8080'")
+}
+
+func handleStart(args []string) {
+	startPort := 8080
+	if len(args) > 0 {
+		for i, arg := range args {
+			if (arg == "--port" || arg == "-p") && i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &startPort)
+				break
+			}
+		}
+	}
+
+	pidFile := getPIDFile()
+	if pid := readPID(pidFile); pid > 0 && isProcessRunning(pid) {
+		fmt.Printf("kosmo is already running (PID: %d)\n", pid)
+		return
+	}
+
+	if os.Getenv("KOSMO_DAEMON") == "" {
+		if shouldDaemonize() {
+			if err := daemonize(); err != nil {
+				fmt.Printf("failed to daemonize: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
+	if shouldDaemonize() {
+		setupDaemonStdio()
+	}
+
+	port := findAvailablePort(startPort)
+	if port != startPort {
+		fmt.Printf("port %d in use, using %d instead\n", startPort, port)
+	}
+
+	loadState()
+
+	if err := writePID(pidFile, os.Getpid()); err != nil {
+		fmt.Printf("failed to write PID file: %v\n", err)
+	}
+
+	fmt.Printf("kosmo server running on port %d (PID: %d)\n", port, os.Getpid())
+	fmt.Println("ready for deployments...")
+
+	http.HandleFunc("/deploy", handleDeployHTTP)
+
+	fmt.Printf("starting HTTP server on :%d\n", port)
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
+		fmt.Printf("server failed: %v\n", err)
+		os.Remove(pidFile)
+		os.Exit(1)
+	}
+}
+
+func handleStop() {
+	pidFile := getPIDFile()
+	pid := readPID(pidFile)
+	if pid == 0 {
+		fmt.Println("kosmo is not running")
+		return
+	}
+
+	if !isProcessRunning(pid) {
+		fmt.Println("kosmo is not running (stale PID file)")
+		os.Remove(pidFile)
+		return
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		fmt.Printf("failed to find process: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		fmt.Printf("failed to stop kosmo: %v\n", err)
+		os.Exit(1)
+	}
+
+	for i := 0; i < 10; i++ {
+		if !isProcessRunning(pid) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	if isProcessRunning(pid) {
+		proc.Kill()
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	os.Remove(pidFile)
+	fmt.Println("kosmo stopped")
+}
+
+func handleStatus() {
+	pidFile := getPIDFile()
+	pid := readPID(pidFile)
+	if pid == 0 {
+		fmt.Println("kosmo is not running")
+		return
+	}
+
+	if isProcessRunning(pid) {
+		fmt.Printf("kosmo is running: (pid: %d)\n", pid)
+	} else {
+		fmt.Println("kosmo is not running")
+		os.Remove(pidFile)
+	}
+}
+
+func handleDeploy(args []string) {
+	server, _ := parseArgs(args, "--server", "-s")
+	if server == "" {
+		fmt.Println("missing --server <url>")
+		os.Exit(1)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Printf("failed to get cwd: %v\n", err)
+		os.Exit(1)
+	}
+
+	app := filepath.Base(cwd)
+	fmt.Printf("preparing deployment for: %s ...\n", app)
+
+	cfg, err := loadClientConfig()
+	if err != nil {
+		fmt.Printf("missing kosmo config, run `kosmo login` first: %v\n", err)
+		os.Exit(1)
+	}
+
+	tarballData, err := createTarball()
+	if err != nil {
+		fmt.Printf("failed to create tarball: %v\n", err)
+		os.Exit(1)
+	}
+
+	timestamp := time.Now().Unix()
+	authReq := AuthRequest{
+		App:       app,
+		Timestamp: timestamp,
+		Payload:   tarballData,
+	}
+
+	message, err := json.Marshal(authReq)
+	if err != nil {
+		fmt.Printf("failed to marshal auth request: %v\n", err)
+		os.Exit(1)
+	}
+
+	privBytes, err := base64.StdEncoding.DecodeString(cfg.ClientPriv)
+	if err != nil {
+		fmt.Printf("failed to decode private key: %v\n", err)
+		os.Exit(1)
+	}
+
+	sig := ed25519.Sign(privBytes, message)
+
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/deploy?app=%s", server, app), bytes.NewReader(tarballData))
+	if err != nil {
+		fmt.Printf("failed to create request: %v\n", err)
+		os.Exit(1)
+	}
+
+	req.Header.Set("Content-Type", "application/gzip")
+	req.Header.Set("X-Kosmo-Pubkey", cfg.ClientPub)
+	req.Header.Set("X-Kosmo-Signature", base64.StdEncoding.EncodeToString(sig))
+	req.Header.Set("X-Kosmo-Timestamp", fmt.Sprintf("%d", timestamp))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Printf("deploy failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	io.Copy(os.Stdout, resp.Body)
+}
+
+func parseArgs(args []string, key1, key2 string) (string, string) {
+	var val1, val2 string
+	for i, arg := range args {
+		if (arg == key1 || (key2 != "" && arg == key2)) && i+1 < len(args) {
+			if arg == key1 {
+				val1 = args[i+1]
+			} else if key2 != "" {
+				val2 = args[i+1]
+			}
+		}
+	}
+	return val1, val2
+}
+
+func shouldDaemonize() bool {
+	if stat, err := os.Stdin.Stat(); err == nil {
+		return (stat.Mode() & os.ModeCharDevice) != 0
+	}
+	return false
+}
+
+func loadClientConfig() (*Config, error) {
+	home, _ := os.UserHomeDir()
+	cfgPath := filepath.Join(home, ".kosmo", "config.json")
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(cfgData, &cfg); err != nil {
+		return nil, err
+	}
+
+	return &cfg, nil
+}
+
+func createTarball() ([]byte, error) {
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+		gzw := gzip.NewWriter(pw)
+		defer gzw.Close()
+		tw := tar.NewWriter(gzw)
+		defer tw.Close()
+
+		filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if strings.Contains(path, ".git") || strings.Contains(path, ".kosmo") {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			hdr, err := tar.FileInfoHeader(info, "")
+			if err != nil {
+				return err
+			}
+			hdr.Name = path
+			tw.WriteHeader(hdr)
+
+			if !info.IsDir() {
+				f, err := os.Open(path)
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+				io.Copy(tw, f)
+			}
+			return nil
+		})
+	}()
+
+	return io.ReadAll(pr)
+}
 
 // load state on startup
 func loadState() {
@@ -487,7 +536,7 @@ func gracefulShutdown(process *os.Process) {
 	}
 }
 
-func handleDeploy(w http.ResponseWriter, r *http.Request) {
+func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("\n--- deployment request received ---")
 
 	// extract auth headers
@@ -504,44 +553,20 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		app = "app"
 	}
 
-	// load server key to verify client is using correct server token
-	home, _ := os.UserHomeDir()
-	serverPubKeyFile := filepath.Join(home, ".kosmo", "keys", "server_ed25519.pub")
-	_, err := os.ReadFile(serverPubKeyFile)
+	// Read the request body for signature verification
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "server not configured", http.StatusInternalServerError)
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
 
-	// verify signature
-	pubBytes, err := base64.StdEncoding.DecodeString(pubB64)
-	if err != nil {
-		http.Error(w, "invalid pubkey", 400)
-		return
-	}
-	sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
-	if err != nil {
-		http.Error(w, "invalid signature", 400)
+	// Verify client authentication using the new system
+	if err := verifyClientAuth(pubB64, sigB64, ts, app, body); err != nil {
+		fmt.Printf("authentication failed: %v\n", err)
+		http.Error(w, "authentication failed: "+err.Error(), http.StatusForbidden)
 		return
 	}
 
-	// validate timestamp (prevent replay attacks)
-	reqTimestamp, err := strconv.ParseInt(ts, 10, 64)
-	if err != nil {
-		http.Error(w, "invalid timestamp", 400)
-		return
-	}
-	now := time.Now().Unix()
-	if now-reqTimestamp > 300 || reqTimestamp-now > 60 {
-		http.Error(w, "request too old or from future", 400)
-		return
-	}
-
-	msg := fmt.Sprintf("%s-%s", app, ts)
-	if !ed25519.Verify(pubBytes, []byte(msg), sigBytes) {
-		http.Error(w, "signature verification failed", http.StatusForbidden)
-		return
-	}
 	fmt.Printf("authenticated deploy from client: %s ...\n", pubB64[:16])
 
 	// create build directory
@@ -552,8 +577,8 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	os.MkdirAll(appBuildDir, 0755)
 
-	// decompress and untar the request
-	gzr, err := gzip.NewReader(r.Body)
+	// decompress and untar the request (using the body we already read)
+	gzr, err := gzip.NewReader(bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "failed to read gzip: "+err.Error(), 500)
 		return
