@@ -401,7 +401,6 @@ func handleRollback(args []string) {
 
 	fmt.Printf("rolling back app '%s' to previous version...\n", app)
 
-	// graceful shutdown current version
 	if appInfo.Process != nil {
 		gracefulShutdown(appInfo.Process)
 	}
