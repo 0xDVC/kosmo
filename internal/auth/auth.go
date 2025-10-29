@@ -39,15 +39,26 @@ type AuthRequest struct {
 }
 
 func InitServer() {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("failed to get home dir: %v\n", err)
+		os.Exit(1)
+	}
 	keyDir := filepath.Join(home, ".kosmo", "keys")
-	os.MkdirAll(keyDir, 0700)
+	if err := os.MkdirAll(keyDir, 0700); err != nil {
+		fmt.Printf("failed to create key dir: %v\n", err)
+		os.Exit(1)
+	}
 
 	serverPubKeyFile := filepath.Join(keyDir, "server_ed25519.pub")
 	serverPrivKeyFile := filepath.Join(keyDir, "server_ed25519")
 
 	if _, err := os.Stat(serverPrivKeyFile); err == nil {
-		pub, _ := os.ReadFile(serverPubKeyFile)
+		pub, err := os.ReadFile(serverPubKeyFile)
+		if err != nil {
+			fmt.Printf("failed to read server pubkey: %v\n", err)
+			os.Exit(1)
+		}
 		pubStr := base64.StdEncoding.EncodeToString(pub)
 		fmt.Printf("Server token: KOSMO-%s\n", pubStr)
 		return
@@ -59,8 +70,14 @@ func InitServer() {
 		os.Exit(1)
 	}
 
-	os.WriteFile(serverPrivKeyFile, priv, 0600)
-	os.WriteFile(serverPubKeyFile, pub, 0644)
+	if err := os.WriteFile(serverPrivKeyFile, priv, 0600); err != nil {
+		fmt.Printf("failed to write server private key: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(serverPubKeyFile, pub, 0644); err != nil {
+		fmt.Printf("failed to write server public key: %v\n", err)
+		os.Exit(1)
+	}
 
 	pubStr := base64.StdEncoding.EncodeToString(pub)
 
@@ -86,9 +103,16 @@ func InitServer() {
 func InitClient(serverURL, serverKey string) {
 	serverKey = strings.TrimPrefix(serverKey, "KOSMO-")
 
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("failed to get home dir: %v\n", err)
+		os.Exit(1)
+	}
 	keyDir := filepath.Join(home, ".kosmo", "keys")
-	os.MkdirAll(keyDir, 0700)
+	if err := os.MkdirAll(keyDir, 0700); err != nil {
+		fmt.Printf("failed to create key dir: %v\n", err)
+		os.Exit(1)
+	}
 
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -103,16 +127,26 @@ func InitClient(serverURL, serverKey string) {
 		ClientPriv: base64.StdEncoding.EncodeToString(priv),
 	}
 
-	data, _ := json.MarshalIndent(cfg, "", "  ")
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		fmt.Printf("failed to marshal client config: %v\n", err)
+		os.Exit(1)
+	}
 	cfgPath := filepath.Join(home, ".kosmo", "config.json")
-	os.WriteFile(cfgPath, data, 0600)
+	if err := os.WriteFile(cfgPath, data, 0600); err != nil {
+		fmt.Printf("failed to write client config: %v\n", err)
+		os.Exit(1)
+	}
 
 	fmt.Printf("kosmo client configured. ready to deploy.\n")
 	fmt.Printf("server: %s\n", serverURL)
 }
 
 func LoadServerConfig() (*ServerConfig, error) {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
 	configFile := filepath.Join(home, ".kosmo", "server_config.json")
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -128,9 +162,14 @@ func LoadServerConfig() (*ServerConfig, error) {
 }
 
 func SaveServerConfig(config *ServerConfig) error {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
 	configDir := filepath.Join(home, ".kosmo")
-	os.MkdirAll(configDir, 0700)
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		return err
+	}
 
 	configFile := filepath.Join(configDir, "server_config.json")
 	data, err := json.MarshalIndent(config, "", "  ")
