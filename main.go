@@ -29,7 +29,7 @@ var (
 	appsMutex   sync.RWMutex
 )
 
-// TODO: break into smaller files after
+// TODO: break into smaller files after v0.1.0
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("welcome to kosmo! your dev first, self-hosted deployment tool")
@@ -71,6 +71,7 @@ func main() {
 	}
 }
 
+//client management
 func handleAddClient(args []string) {
 	pubkey, _ := parseArgs(args, "--pubkey", "")
 	if pubkey == "" {
@@ -117,6 +118,7 @@ func handleListClients() {
 	}
 }
 
+// ---- Deployment Commands ----
 func handleLogin(args []string) {
 	serverURL, serverKey := parseArgs(args, "--server", "--key")
 	if serverURL == "" || serverKey == "" {
@@ -144,6 +146,7 @@ func handleInit() {
 	fmt.Println("-- run 'kosmo deploy --server http://<ip>:8080'")
 }
 
+// ---- Server Management ----
 func handleStart(args []string) {
 	startPort := 8080
 	if len(args) > 0 {
@@ -452,6 +455,7 @@ func handleRollback(args []string) {
 	fmt.Printf("logs: %s\n", appInfo.LogFile)
 }
 
+// ---- Helper Functions ----
 func parseArgs(args []string, key1, key2 string) (string, string) {
 	var val1, val2 string
 	for i, arg := range args {
@@ -490,6 +494,7 @@ func loadClientConfig() (*Config, error) {
 }
 
 // TODO: currently loads the whole app into memory. need to find an efficeint to doing this shit.
+// NOTE: this is probably fine for most apps, but huge repos will be slow
 func createTarball() ([]byte, error) {
 	pr, pw := io.Pipe()
 	go func() {
@@ -549,6 +554,7 @@ func loadState() {
 	maxPort := 8080
 	for name, info := range state {
 		// check if process still exists
+		// NOTE: not the best way to check pid, revise later
 		proc, err := os.FindProcess(info.PID)
 		if err != nil {
 			continue
@@ -644,11 +650,9 @@ func waitForHealth(url string, timeoutSeconds int) bool {
 }
 
 func gracefulShutdown(process *os.Process) {
-	// send kill signal first
 	process.Signal(syscall.SIGTERM)
-
-	// wait for process to exit
 	done := make(chan error, 1)
+
 	go func() {
 		_, err := process.Wait()
 		done <- err
@@ -774,6 +778,7 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// blue-green deployment, start new version first
+	// NOTE: this port allocation is kinda hacky but works
 	appsMutex.Lock()
 	newPort := nextPort
 	nextPort++
@@ -802,18 +807,15 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// check if old version exists before health check
 	appsMutex.Lock()
 	oldApp, exists := runningApps[app]
 	appsMutex.Unlock()
 
-	// health check new version
 	fmt.Printf("checking on port %d...\n", newPort)
 	healthURL := fmt.Sprintf("http://localhost:%d/health", newPort)
+	// healthURL := fmt.Sprintf("http://localhost:%d/healthz", newPort)
 	if !waitForHealth(healthURL, 30) {
 		runCmd.Process.Kill()
-
-		// Keep old version running if it exists
 		if exists {
 			fmt.Println("new version failed health check, keeping old version")
 			http.Error(w, "deployment failed: health check timeout", 500)
@@ -825,11 +827,9 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//switch traffic
 	appsMutex.Lock()
 	version := fmt.Sprintf("%d", timestamp)
 
-	// preserve previous version info if it exists
 	var prevPath, prevLog string
 	if oldApp != nil {
 		prevPath = oldApp.Path
@@ -867,7 +867,8 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "logs: %s\n", logFile)
 }
 
-// daemonization helpers
+// ---- Daemonization Helpers ----
+// TODO: work on this after v0.1.0 release.
 func getPIDFile() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -897,7 +898,6 @@ func daemonize() error {
 		execPath = os.Args[0]
 	}
 
-	// re-execute with the daemon's env varibale
 	cmd := exec.Command(execPath, os.Args[1:]...)
 	cmd.Env = append(os.Environ(), "KOSMO_DAEMON=1")
 	cmd.Stdin = nil
@@ -920,6 +920,7 @@ func daemonize() error {
 
 func setupDaemonStdio() {
 	// redirect stdin to /dev/null
+	// NOTE: this is probably overkill but whatever
 	devNull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to open /dev/null: %v\n", err)
@@ -981,5 +982,6 @@ func isProcessRunning(pid int) bool {
 	if err != nil {
 		return false
 	}
+	// maybe use /proc/pid/stat on linux later?
 	return proc.Signal(syscall.Signal(0)) == nil
 }
