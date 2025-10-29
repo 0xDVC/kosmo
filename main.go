@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/0xDVC/kosmo/internal/auth"
+	"github.com/0xDVC/kosmo/internal/commands"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
 )
@@ -44,100 +45,70 @@ func main() {
 
 	switch cmd {
 	case "setup":
-		auth.Setup()
+		commands.Setup()
 	case "add-client":
-		handleAddClient(args)
+		commands.AddClient(args)
 	case "remove-client":
-		handleRemoveClient(args)
+		commands.RemoveClient(args)
 	case "list-clients":
-		handleListClients()
+		commands.ListClients()
 	case "login":
-		handleLogin(args)
+		commands.Login(args)
+	case "auth:login":
+		commands.Login(args)
 	case "init":
-		handleInit()
+		cmdInit()
 	case "up":
-		handleUp(args)
+		cmdUp(args)
 	case "stop":
-		handleStop(args)
+		cmdStop(args)
+	case "apps:stop":
+		if len(args) >= 1 && !strings.HasPrefix(args[0], "-") {
+			cmdStop([]string{"--app", args[0]})
+		} else {
+			cmdStop(args)
+		}
 	case "down":
-		handleDown()
+		cmdDown()
 	case "status":
-		handleStatus()
+		cmdStatus()
 	case "deploy":
-		handleDeploy(args)
+		cmdDeploy(args)
 	case "logs":
-		handleLogs(args)
+		if len(args) >= 1 && !strings.HasPrefix(args[0], "-") {
+			cmdLogs([]string{"--app", args[0]})
+		} else {
+			cmdLogs(args)
+		}
+	case "apps:logs":
+		if len(args) >= 1 && !strings.HasPrefix(args[0], "-") {
+			cmdLogs([]string{"--app", args[0]})
+		} else {
+			cmdLogs(args)
+		}
 	case "rollback":
-		handleRollback(args)
+		cmdRollback(args)
 	case "ps":
-		handlePs()
+		cmdPs()
+	case "apps":
+		cmdPs()
 	case "restart":
-		handleRestart(args)
+		cmdRestart(args)
+	case "apps:restart":
+		if len(args) >= 1 && !strings.HasPrefix(args[0], "-") {
+			cmdRestart([]string{"--app", args[0]})
+		} else {
+			cmdRestart(args)
+		}
 	default:
 		fmt.Printf("kosmo: unknown command '%s'\n", cmd)
 		os.Exit(1)
 	}
 }
 
-// client management
-func handleAddClient(args []string) {
-	pubkey, _ := parseArgs(args, "--pubkey", "")
-	if pubkey == "" {
-		fmt.Println("usage: kosmo add-client --pubkey <pubkey>")
-		os.Exit(1)
-	}
-
-	if err := auth.AddClient(pubkey); err != nil {
-		fmt.Printf("failed to add client: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("client %s added successfully\n", pubkey[:16]+"...")
-}
-
-func handleRemoveClient(args []string) {
-	pubkey, _ := parseArgs(args, "--pubkey", "")
-	if pubkey == "" {
-		fmt.Println("usage: kosmo remove-client --pubkey <pubkey>")
-		os.Exit(1)
-	}
-
-	if err := auth.RemoveClient(pubkey); err != nil {
-		fmt.Printf("failed to remove client: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("client removed successfully")
-}
-
-func handleListClients() {
-	clients, err := auth.ListClients()
-	if err != nil {
-		fmt.Printf("failed to list clients: %v\n", err)
-		os.Exit(1)
-	}
-
-	if len(clients) == 0 {
-		fmt.Println("no clients configured")
-		return
-	}
-
-	fmt.Println("Allowed clients:")
-	for _, pubkey := range clients {
-		fmt.Printf("  %s\n", pubkey[:16]+"...")
-	}
-}
-
 // ---- Deployment Commands ----
-func handleLogin(args []string) {
-	serverURL, serverKey := parseArgs(args, "--server", "--key")
-	if serverURL == "" || serverKey == "" {
-		fmt.Println("usage: kosmo login --server <url> --key <KOSMO-key>")
-		os.Exit(1)
-	}
 
-	auth.Login(serverURL, serverKey)
-}
-
-func handleInit() {
+func cmdInit() {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Printf("failed to get cwd: %v\n", err)
@@ -154,7 +125,7 @@ func handleInit() {
 	fmt.Println("-- run 'kosmo deploy --server http://<ip>:8080'")
 }
 
-func handleUp(args []string) {
+func cmdUp(args []string) {
 	startPort := 8080
 	if len(args) > 0 {
 		for i, arg := range args {
@@ -209,7 +180,7 @@ func handleUp(args []string) {
 	}
 }
 
-func handleDown() {
+func cmdDown() {
 	pidFile := getPIDFile()
 	pid := readPID(pidFile)
 	if pid == 0 {
@@ -250,7 +221,7 @@ func handleDown() {
 	fmt.Println("kosmo stopped")
 }
 
-func handleStatus() {
+func cmdStatus() {
 	pidFile := getPIDFile()
 	pid := readPID(pidFile)
 	if pid == 0 {
@@ -266,7 +237,7 @@ func handleStatus() {
 	}
 }
 
-func handleDeploy(args []string) {
+func cmdDeploy(args []string) {
 	server, _ := parseArgs(args, "--server", "-s")
 	if server == "" {
 		fmt.Println("missing --server <url>")
@@ -336,7 +307,7 @@ func handleDeploy(args []string) {
 	io.Copy(os.Stdout, resp.Body)
 }
 
-func handleLogs(args []string) {
+func cmdLogs(args []string) {
 	app, _ := parseArgs(args, "--app", "")
 	if app == "" {
 		fmt.Println("usage: kosmo logs --app <app-name>")
@@ -367,7 +338,7 @@ func handleLogs(args []string) {
 	}
 }
 
-func handleRollback(args []string) {
+func cmdRollback(args []string) {
 	app, _ := parseArgs(args, "--app", "")
 	if app == "" {
 		fmt.Println("usage: kosmo rollback --app <app-name>")
@@ -461,7 +432,7 @@ func handleRollback(args []string) {
 	fmt.Printf("logs: %s\n", appInfo.LogFile)
 }
 
-func handlePs() {
+func cmdPs() {
 	appsMutex.RLock()
 	defer appsMutex.RUnlock()
 
@@ -482,7 +453,7 @@ func handlePs() {
 	}
 }
 
-func handleStop(args []string) {
+func cmdStop(args []string) {
 	app, _ := parseArgs(args, "--app", "")
 	if app == "" {
 		fmt.Println("usage: kosmo stop --app <app-name>")
@@ -507,7 +478,7 @@ func handleStop(args []string) {
 	fmt.Printf("app '%s' stopped\n", app)
 }
 
-func handleRestart(args []string) {
+func cmdRestart(args []string) {
 	app, _ := parseArgs(args, "--app", "")
 	if app == "" {
 		fmt.Println("usage: kosmo restart --app <app-name>")
