@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"crypto/ed25519"
@@ -14,9 +14,9 @@ import (
 )
 
 var (
-	errClientNotAllowed = fmt.Errorf("client not in allowlist")
-	errInvalidSignature = fmt.Errorf("signature verification failed")
-	errInvalidTimestamp = fmt.Errorf("request too old or from future")
+	ErrClientNotAllowed = fmt.Errorf("client not in allowlist")
+	ErrInvalidSignature = fmt.Errorf("signature verification failed")
+	ErrInvalidTimestamp = fmt.Errorf("request too old or from future")
 )
 
 type Config struct {
@@ -38,7 +38,7 @@ type AuthRequest struct {
 	Payload   []byte `json:"payload"`
 }
 
-func kosmoSetup() {
+func Setup() {
 	home, _ := os.UserHomeDir()
 	keyDir := filepath.Join(home, ".kosmo", "keys")
 	os.MkdirAll(keyDir, 0700)
@@ -70,7 +70,7 @@ func kosmoSetup() {
 		AllowedClients: []string{},
 	}
 
-	if err := saveServerConfig(config); err != nil {
+	if err := SaveServerConfig(config); err != nil {
 		fmt.Printf("failed to save server config: %v\n", err)
 		os.Exit(1)
 	}
@@ -79,11 +79,11 @@ func kosmoSetup() {
 	fmt.Printf("Server token (give this to clients):\n")
 	fmt.Printf("KOSMO-%s\n", pubStr)
 	fmt.Printf("\nNext steps:\n")
-	fmt.Printf("1. start the server: kosmo start\n")
+	fmt.Printf("1. start the server: kosmo up\n")
 	fmt.Printf("2. add clients: kosmo add-client --pubkey <client-pubkey>\n")
 }
 
-func kosmoLogin(serverURL, serverKey string) {
+func Login(serverURL, serverKey string) {
 	serverKey = strings.TrimPrefix(serverKey, "KOSMO-")
 
 	home, _ := os.UserHomeDir()
@@ -111,7 +111,7 @@ func kosmoLogin(serverURL, serverKey string) {
 	fmt.Printf("server: %s\n", serverURL)
 }
 
-func loadServerConfig() (*ServerConfig, error) {
+func LoadServerConfig() (*ServerConfig, error) {
 	home, _ := os.UserHomeDir()
 	configFile := filepath.Join(home, ".kosmo", "server_config.json")
 	data, err := os.ReadFile(configFile)
@@ -127,7 +127,7 @@ func loadServerConfig() (*ServerConfig, error) {
 	return &config, nil
 }
 
-func saveServerConfig(config *ServerConfig) error {
+func SaveServerConfig(config *ServerConfig) error {
 	home, _ := os.UserHomeDir()
 	configDir := filepath.Join(home, ".kosmo")
 	os.MkdirAll(configDir, 0700)
@@ -141,8 +141,8 @@ func saveServerConfig(config *ServerConfig) error {
 	return os.WriteFile(configFile, data, 0600)
 }
 
-func verifyClientAuth(clientPubKey, signature, timestamp, app string, payload []byte) error {
-	config, err := loadServerConfig()
+func VerifyClientAuth(clientPubKey, signature, timestamp, app string, payload []byte) error {
+	config, err := LoadServerConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load server config: %w", err)
 	}
@@ -156,7 +156,7 @@ func verifyClientAuth(clientPubKey, signature, timestamp, app string, payload []
 	}
 
 	if !allowed {
-		return errClientNotAllowed
+		return ErrClientNotAllowed
 	}
 
 	pubBytes, err := base64.StdEncoding.DecodeString(clientPubKey)
@@ -176,7 +176,7 @@ func verifyClientAuth(clientPubKey, signature, timestamp, app string, payload []
 
 	now := time.Now().Unix()
 	if now-reqTimestamp > 300 || reqTimestamp-now > 60 {
-		return errInvalidTimestamp
+		return ErrInvalidTimestamp
 	}
 
 	authReq := AuthRequest{
@@ -191,14 +191,14 @@ func verifyClientAuth(clientPubKey, signature, timestamp, app string, payload []
 	}
 
 	if !ed25519.Verify(pubBytes, message, sigBytes) {
-		return errInvalidSignature
+		return ErrInvalidSignature
 	}
 
 	return nil
 }
 
-func addClient(pubKey string) error {
-	config, err := loadServerConfig()
+func AddClient(pubKey string) error {
+	config, err := LoadServerConfig()
 	if err != nil {
 		return err
 	}
@@ -210,11 +210,11 @@ func addClient(pubKey string) error {
 	}
 
 	config.AllowedClients = append(config.AllowedClients, pubKey)
-	return saveServerConfig(config)
+	return SaveServerConfig(config)
 }
 
-func removeClient(pubKey string) error {
-	config, err := loadServerConfig()
+func RemoveClient(pubKey string) error {
+	config, err := LoadServerConfig()
 	if err != nil {
 		return err
 	}
@@ -227,11 +227,11 @@ func removeClient(pubKey string) error {
 	}
 
 	config.AllowedClients = newClients
-	return saveServerConfig(config)
+	return SaveServerConfig(config)
 }
 
-func listClients() ([]string, error) {
-	config, err := loadServerConfig()
+func ListClients() ([]string, error) {
+	config, err := LoadServerConfig()
 	if err != nil {
 		return nil, err
 	}

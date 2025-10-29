@@ -10,13 +10,18 @@ import (
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8081"
+		port = "8080"
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Hello from kosmo-deployed app! Time: %s\n", time.Now().Format(time.RFC3339))
 	})
 
-	fmt.Printf("Sample app starting on :%s\n", port)
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		fmt.Fprintf(w, "ok")
+	})
+
+	fmt.Printf("Server starting on port %s\n", port)
 	http.ListenAndServe(":"+port, nil)
 }

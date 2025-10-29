@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/0xDVC/kosmo/internal/auth"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
 )
 
@@ -29,7 +31,7 @@ var (
 	appsMutex   sync.RWMutex
 )
 
-// TODO: break into smaller files after v0.1.0
+// TODO: break into smaller files before v0.1.0 released
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("welcome to kosmo! your dev first, self-hosted deployment tool")
@@ -42,7 +44,7 @@ func main() {
 
 	switch cmd {
 	case "setup":
-		kosmoSetup()
+		auth.Setup()
 	case "add-client":
 		handleAddClient(args)
 	case "remove-client":
@@ -85,7 +87,7 @@ func handleAddClient(args []string) {
 		os.Exit(1)
 	}
 
-	if err := addClient(pubkey); err != nil {
+	if err := auth.AddClient(pubkey); err != nil {
 		fmt.Printf("failed to add client: %v\n", err)
 		os.Exit(1)
 	}
@@ -99,7 +101,7 @@ func handleRemoveClient(args []string) {
 		os.Exit(1)
 	}
 
-	if err := removeClient(pubkey); err != nil {
+	if err := auth.RemoveClient(pubkey); err != nil {
 		fmt.Printf("failed to remove client: %v\n", err)
 		os.Exit(1)
 	}
@@ -107,7 +109,7 @@ func handleRemoveClient(args []string) {
 }
 
 func handleListClients() {
-	clients, err := listClients()
+	clients, err := auth.ListClients()
 	if err != nil {
 		fmt.Printf("failed to list clients: %v\n", err)
 		os.Exit(1)
@@ -132,7 +134,7 @@ func handleLogin(args []string) {
 		os.Exit(1)
 	}
 
-	kosmoLogin(serverURL, serverKey)
+	auth.Login(serverURL, serverKey)
 }
 
 func handleInit() {
@@ -293,7 +295,7 @@ func handleDeploy(args []string) {
 	}
 
 	timestamp := time.Now().Unix()
-	authReq := AuthRequest{
+	authReq := auth.AuthRequest{
 		App:       app,
 		Timestamp: timestamp,
 		Payload:   tarballData,
@@ -589,7 +591,7 @@ func shouldDaemonize() bool {
 	return false
 }
 
-func loadClientConfig() (*Config, error) {
+func loadClientConfig() (*auth.Config, error) {
 	home, _ := os.UserHomeDir()
 	cfgPath := filepath.Join(home, ".kosmo", "config.json")
 	cfgData, err := os.ReadFile(cfgPath)
@@ -597,7 +599,7 @@ func loadClientConfig() (*Config, error) {
 		return nil, err
 	}
 
-	var cfg Config
+	var cfg auth.Config
 	if err := json.Unmarshal(cfgData, &cfg); err != nil {
 		return nil, err
 	}
@@ -779,7 +781,7 @@ func gracefulShutdown(process *os.Process) {
 }
 
 func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("\n--- deployment request received ---")
+	log.Info().Msg("deployment request received")
 	// extract auth headers
 	pubB64 := r.Header.Get("X-Kosmo-Pubkey")
 	sigB64 := r.Header.Get("X-Kosmo-Signature")
@@ -802,12 +804,12 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// verify client authentication using the new system
-	if err := verifyClientAuth(pubB64, sigB64, ts, app, body); err != nil {
-		fmt.Printf("authentication failed: %v\n", err)
+	if err := auth.VerifyClientAuth(pubB64, sigB64, ts, app, body); err != nil {
+		log.Error().Err(err).Msg("authentication failed")
 		http.Error(w, fmt.Sprintf("authentication failed: %v", err), http.StatusForbidden)
 		return
 	}
-	fmt.Printf("authenticated deploy from client: %s ...\n", pubB64[:16])
+	log.Info().Msgf("authenticated deploy from client: %s", pubB64[:16])
 
 	// create build directory
 	kosmoDir := ".kosmo"
@@ -868,19 +870,19 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	fmt.Printf("extract done: %s\n", appBuildDir)
+	log.Info().Msgf("extract done: %s", appBuildDir)
 	buildCmd := exec.Command("go", "build", "-o", "app")
 	buildCmd.Dir = appBuildDir
 	buildCmd.Stdout = os.Stdout
 	buildCmd.Stderr = os.Stderr
 
-	fmt.Println("building app...")
+	log.Info().Msg("building app")
 	if err := buildCmd.Run(); err != nil {
-		fmt.Printf("build failed: %v\n", err)
+		log.Error().Err(err).Msg("build failed")
 		http.Error(w, fmt.Sprintf("build failed: %v", err), 500)
 		return
 	}
-	fmt.Println("build done, starting app...")
+	log.Info().Msg("build done, starting app")
 
 	// verify binary exists
 	binaryPath := filepath.Join(appBuildDir, "app")
@@ -923,18 +925,17 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	oldApp, exists := runningApps[app]
 	appsMutex.Unlock()
 
-	fmt.Printf("checking on port %d...\n", newPort)
+	log.Info().Msgf("checking on port %d", newPort)
 	healthURL := fmt.Sprintf("http://localhost:%d/health", newPort)
 	// healthURL := fmt.Sprintf("http://localhost:%d/healthz", newPort)
 	if !waitForHealth(healthURL, 30) {
 		runCmd.Process.Kill()
 		if exists {
-			fmt.Println("new version failed health check, keeping old version")
+			log.Error().Msg("new version failed health check, keeping old version")
 			http.Error(w, "deployment failed: health check timeout", 500)
 			return
 		}
-
-		fmt.Println("app failed health check")
+		log.Error().Msg("app failed health check")
 		http.Error(w, "deployment failed: no /health endpoint responding", 500)
 		return
 	}
@@ -961,7 +962,7 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	appsMutex.Unlock()
 
 	if exists {
-		fmt.Printf("switching from port %d to %d\n", oldApp.Port, newPort)
+		log.Info().Msgf("switching from port %d to %d", oldApp.Port, newPort)
 		gracefulShutdown(oldApp.Process)
 	}
 
