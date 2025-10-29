@@ -53,10 +53,12 @@ func main() {
 		handleLogin(args)
 	case "init":
 		handleInit()
-	case "start":
-		handleStart(args)
+	case "up":
+		handleUp(args)
 	case "stop":
-		handleStop()
+		handleStop(args)
+	case "down":
+		handleDown()
 	case "status":
 		handleStatus()
 	case "deploy":
@@ -65,13 +67,17 @@ func main() {
 		handleLogs(args)
 	case "rollback":
 		handleRollback(args)
+	case "ps":
+		handlePs()
+	case "restart":
+		handleRestart(args)
 	default:
 		fmt.Printf("kosmo: unknown command '%s'\n", cmd)
 		os.Exit(1)
 	}
 }
 
-//client management
+// client management
 func handleAddClient(args []string) {
 	pubkey, _ := parseArgs(args, "--pubkey", "")
 	if pubkey == "" {
@@ -146,8 +152,7 @@ func handleInit() {
 	fmt.Println("-- run 'kosmo deploy --server http://<ip>:8080'")
 }
 
-// ---- Server Management ----
-func handleStart(args []string) {
+func handleUp(args []string) {
 	startPort := 8080
 	if len(args) > 0 {
 		for i, arg := range args {
@@ -202,7 +207,7 @@ func handleStart(args []string) {
 	}
 }
 
-func handleStop() {
+func handleDown() {
 	pidFile := getPIDFile()
 	pid := readPID(pidFile)
 	if pid == 0 {
@@ -453,6 +458,114 @@ func handleRollback(args []string) {
 
 	fmt.Printf("rollback successful! app '%s' running on port %d\n", app, appInfo.Port)
 	fmt.Printf("logs: %s\n", appInfo.LogFile)
+}
+
+func handlePs() {
+	appsMutex.RLock()
+	defer appsMutex.RUnlock()
+
+	if len(runningApps) == 0 {
+		fmt.Println("no apps running")
+		return
+	}
+
+	fmt.Printf("%-15s %-8s %-6s %-6s %-10s\n", "APP", "STATUS", "PORT", "PID", "VERSION")
+	fmt.Println(strings.Repeat("-", 50))
+
+	for name, app := range runningApps {
+		status := "running"
+		if app.Process == nil || !isProcessRunning(app.PID) {
+			status = "stopped"
+		}
+		fmt.Printf("%-15s %-8s %-6d %-6d %-10s\n", name, status, app.Port, app.PID, app.Version)
+	}
+}
+
+func handleStop(args []string) {
+	app, _ := parseArgs(args, "--app", "")
+	if app == "" {
+		fmt.Println("usage: kosmo stop --app <app-name>")
+		os.Exit(1)
+	}
+
+	appsMutex.Lock()
+	defer appsMutex.Unlock()
+
+	appInfo, exists := runningApps[app]
+	if !exists {
+		fmt.Printf("app '%s' not found\n", app)
+		os.Exit(1)
+	}
+
+	if appInfo.Process != nil {
+		gracefulShutdown(appInfo.Process)
+	}
+
+	delete(runningApps, app)
+	saveState()
+	fmt.Printf("app '%s' stopped\n", app)
+}
+
+func handleRestart(args []string) {
+	app, _ := parseArgs(args, "--app", "")
+	if app == "" {
+		fmt.Println("usage: kosmo restart --app <app-name>")
+		os.Exit(1)
+	}
+
+	appsMutex.Lock()
+	appInfo, exists := runningApps[app]
+	if !exists {
+		appsMutex.Unlock()
+		fmt.Printf("app '%s' not found\n", app)
+		os.Exit(1)
+	}
+	appsMutex.Unlock()
+
+	// stop current version
+	appsMutex.Lock()
+	if appInfo.Process != nil {
+		gracefulShutdown(appInfo.Process)
+	}
+	delete(runningApps, app)
+	appsMutex.Unlock()
+
+	// redeploy from current build
+	runCmd := exec.Command(filepath.Join(appInfo.Path, "app"))
+	runCmd.Dir = appInfo.Path
+	runCmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", appInfo.Port))
+
+	f, err := os.OpenFile(appInfo.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Printf("failed to open log file: %v\n", err)
+		os.Exit(1)
+	}
+	runCmd.Stdout = f
+	runCmd.Stderr = f
+	runCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := runCmd.Start(); err != nil {
+		fmt.Printf("failed to start app: %v\n", err)
+		os.Exit(1)
+	}
+
+	// health check
+	healthURL := fmt.Sprintf("http://localhost:%d/health", appInfo.Port)
+	if !waitForHealth(healthURL, 30) {
+		runCmd.Process.Kill()
+		fmt.Println("app failed health check")
+		os.Exit(1)
+	}
+
+	// update state
+	appsMutex.Lock()
+	appInfo.Process = runCmd.Process
+	appInfo.PID = runCmd.Process.Pid
+	runningApps[app] = appInfo
+	appsMutex.Unlock()
+	saveState()
+
+	fmt.Printf("app '%s' restarted on port %d\n", app, appInfo.Port)
 }
 
 // ---- Helper Functions ----
@@ -919,8 +1032,6 @@ func daemonize() error {
 }
 
 func setupDaemonStdio() {
-	// redirect stdin to /dev/null
-	// NOTE: this is probably overkill but whatever
 	devNull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to open /dev/null: %v\n", err)
@@ -931,20 +1042,17 @@ func setupDaemonStdio() {
 		devNull.Close()
 	}
 
-	// redirect stdout/stderr to log file
 	logFile := getLogFile()
 	f, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to open log file %s: %v\n", logFile, err)
 		return
 	}
-
 	if err := unix.Dup2(int(f.Fd()), int(os.Stdout.Fd())); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to redirect stdout: %v\n", err)
 		f.Close()
 		return
 	}
-
 	if err := unix.Dup2(int(f.Fd()), int(os.Stderr.Fd())); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to redirect stderr: %v\n", err)
 		f.Close()
