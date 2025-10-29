@@ -38,7 +38,7 @@ type AuthRequest struct {
 	Payload   []byte `json:"payload"`
 }
 
-func Setup() {
+func InitServer() {
 	home, _ := os.UserHomeDir()
 	keyDir := filepath.Join(home, ".kosmo", "keys")
 	os.MkdirAll(keyDir, 0700)
@@ -83,7 +83,7 @@ func Setup() {
 	fmt.Printf("2. add clients: kosmo add-client --pubkey <client-pubkey>\n")
 }
 
-func Login(serverURL, serverKey string) {
+func InitClient(serverURL, serverKey string) {
 	serverKey = strings.TrimPrefix(serverKey, "KOSMO-")
 
 	home, _ := os.UserHomeDir()
@@ -141,7 +141,7 @@ func SaveServerConfig(config *ServerConfig) error {
 	return os.WriteFile(configFile, data, 0600)
 }
 
-func VerifyClientAuth(clientPubKey, signature, timestamp, app string, payload []byte) error {
+func Verify(clientPubKey, signature, timestamp, app string, payload []byte) error {
 	config, err := LoadServerConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load server config: %w", err)
