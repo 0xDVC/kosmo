@@ -28,7 +28,7 @@ var (
 	runningApps = make(map[string]*AppInfo)
 	appsMutex   sync.RWMutex
 )
-
+//TODO: break into smaller files after 
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("welcome to kosmo! your dev first, self-hosted deployment tool")
@@ -60,6 +60,8 @@ func main() {
 		handleStatus()
 	case "deploy":
 		handleDeploy(args)
+	case "logs":
+		handleLogs(args)
 	default:
 		fmt.Printf("kosmo: unknown command '%s'\n", cmd)
 		os.Exit(1)
@@ -321,7 +323,38 @@ func handleDeploy(args []string) {
 	io.Copy(os.Stdout, resp.Body)
 }
 
-func parseArgs(args []string, key1, key2 string) (string, string) {
+func handleLogs(args []string) {
+	app, _ := parseArgs(args, "--app", "")
+	if app == "" {
+		fmt.Println("usage: kosmo logs --app <app-name>")
+		os.Exit(1)
+	}
+
+	appsMutex.RLock()
+	appInfo, exists := runningApps[app]
+	appsMutex.RUnlock()
+
+	if !exists {
+		fmt.Printf("app '%s' is not running\n", app)
+		os.Exit(1)
+	}
+
+	if appInfo.LogFile == "" {
+		fmt.Printf("no log file found for app '%s'\n", app)
+		os.Exit(1)
+	}
+
+	cmd := exec.Command("tail", "-f", appInfo.LogFile)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err!= nil {
+		fmt.Printf("failed to tail logs: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func parseArgs(args []string, key1,key2 string) (string, string) {
 	var val1, val2 string
 	for i, arg := range args {
 		if (arg == key1 || (key2 != "" && arg == key2)) && i+1 < len(args) {
@@ -358,6 +391,7 @@ func loadClientConfig() (*Config, error) {
 	return &cfg, nil
 }
 
+// TODO: currently loads the whole app into memory. need to find an efficeint to doing this shit.
 func createTarball() ([]byte, error) {
 	pr, pw := io.Pipe()
 	go func() {
@@ -421,10 +455,8 @@ func loadState() {
 		if err != nil {
 			continue
 		}
-
-		// check if process is actually running (works on Linux and macOS)
 		if proc.Signal(syscall.Signal(0)) != nil {
-			continue // process is dead
+			continue 
 		}
 
 		runningApps[name] = &AppInfo{
@@ -433,6 +465,7 @@ func loadState() {
 			Port:    info.Port,
 			Version: info.Version,
 			Path:    info.Path,
+			LogFile: info.LogFile,
 		}
 
 		if info.Port > maxPort {
@@ -452,6 +485,7 @@ func saveState() {
 			Port:    app.Port,
 			Version: app.Version,
 			Path:    app.Path,
+			LogFile: app.LogFile,
 		}
 	}
 	appsMutex.RUnlock()
@@ -479,6 +513,7 @@ type AppInfo struct {
 	Port    int         `json:"port"`
 	Version string      `json:"version"`
 	Path    string      `json:"path"`
+	LogFile string      `json:"log_file"`
 }
 
 func findAvailablePort(startPort int) int {
@@ -514,7 +549,6 @@ func gracefulShutdown(process *os.Process) {
 		_, err := process.Wait()
 		done <- err
 	}()
-
 	select {
 	case <-done:
 		return
@@ -526,7 +560,6 @@ func gracefulShutdown(process *os.Process) {
 
 func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("\n--- deployment request received ---")
-
 	// extract auth headers
 	pubB64 := r.Header.Get("X-Kosmo-Pubkey")
 	sigB64 := r.Header.Get("X-Kosmo-Signature")
@@ -541,20 +574,19 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 		app = "app"
 	}
 
-	// Read the request body for signature verification
+	// read the request body for signature verification
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
 
-	// Verify client authentication using the new system
+	// verify client authentication using the new system
 	if err := verifyClientAuth(pubB64, sigB64, ts, app, body); err != nil {
 		fmt.Printf("authentication failed: %v\n", err)
 		http.Error(w, "authentication failed: "+err.Error(), http.StatusForbidden)
 		return
 	}
-
 	fmt.Printf("authenticated deploy from client: %s ...\n", pubB64[:16])
 
 	// create build directory
@@ -617,8 +649,6 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Printf("extract done: %s\n", appBuildDir)
-
-	// build and run the app
 	buildCmd := exec.Command("go", "build", "-o", "app")
 	buildCmd.Dir = appBuildDir
 	buildCmd.Stdout = os.Stdout
@@ -630,7 +660,6 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "build failed: "+err.Error(), 500)
 		return
 	}
-
 	fmt.Println("build done, starting app...")
 
 	// verify binary exists
@@ -640,17 +669,25 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// blue-green deployment: start new version first
+	// blue-green deployment, start new version first
 	appsMutex.Lock()
 	newPort := nextPort
 	nextPort++
 	appsMutex.Unlock()
 
+	// app-specific log file
+	logFile := filepath.Join(appBuildDir, "app.log")
+	f, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		http.Error(w, "failed to create app log file: "+err.Error(), 500)
+		return
+	}
+
 	runCmd := exec.Command(binaryPath)
 	runCmd.Dir = appBuildDir
 	runCmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", newPort))
-	runCmd.Stdout = os.Stdout
-	runCmd.Stderr = os.Stderr
+	runCmd.Stdout = f
+	runCmd.Stderr = f
 
 	// set process group for proper cleanup
 	runCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -684,7 +721,7 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// switch traffic
+	//switch traffic
 	appsMutex.Lock()
 	version := fmt.Sprintf("%d", timestamp)
 	runningApps[app] = &AppInfo{
@@ -693,6 +730,7 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 		Port:    newPort,
 		Version: version,
 		Path:    appBuildDir,
+		LogFile: logFile,
 	}
 	appsMutex.Unlock()
 
@@ -704,7 +742,7 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	// save state to disk
 	saveState()
 
-	// return the URL
+	// return the url and log file
 	host := r.Host
 	if host == "" {
 		host = "localhost"
@@ -712,9 +750,10 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	url := fmt.Sprintf("http://%s:%d", host, newPort)
 
 	fmt.Fprintf(w, "deployed to %s (version %s)\n", url, version)
+	fmt.Fprintf(w, "logs: %s\n", logFile)
 }
 
-//daemonization helpers
+// daemonization helpers
 func getPIDFile() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -723,30 +762,28 @@ func getPIDFile() string {
 	return filepath.Join(home, ".kosmo", "kosmo.pid")
 }
 
+// TODO: work on this after v0.1.0 release.
 func getLogFile() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		// Fallback to current directory if can't get home
 		logDir := ".kosmo"
 		os.MkdirAll(logDir, 0755)
 		return filepath.Join(logDir, "kosmo.log")
 	}
 	logDir := filepath.Join(home, ".kosmo")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
-		// Fallback to current directory if can't create
 		return filepath.Join(".kosmo", "kosmo.log")
 	}
 	return filepath.Join(logDir, "kosmo.log")
 }
 
 func daemonize() error {
-	// Find the executable path
 	execPath, err := os.Executable()
 	if err != nil {
 		execPath = os.Args[0]
 	}
 
-	// Re-execute with KOSMO_DAEMON=1
+	// re-execute with the daemon's env varibale
 	cmd := exec.Command(execPath, os.Args[1:]...)
 	cmd.Env = append(os.Environ(), "KOSMO_DAEMON=1")
 	cmd.Stdin = nil
@@ -764,7 +801,7 @@ func daemonize() error {
 	fmt.Printf("logs: %s\n", getLogFile())
 	os.Exit(0)
 
-	return nil // unreachable
+	return nil
 }
 
 func setupDaemonStdio() {
@@ -830,16 +867,5 @@ func isProcessRunning(pid int) bool {
 	if err != nil {
 		return false
 	}
-
-	// Signal 0 doesn't actually send a signal, just checks if process exists
-	// Works on both Linux and macOS
-	err = proc.Signal(syscall.Signal(0))
-	if err != nil {
-		// Process doesn't exist or we don't have permission
-		return false
-	}
-
-	// Additional check: on Unix systems, try to get process state
-	// This helps catch cases where the process exists but is zombie
-	return true
+	return proc.Signal(syscall.Signal(0)) == nil
 }
