@@ -28,7 +28,8 @@ var (
 	runningApps = make(map[string]*AppInfo)
 	appsMutex   sync.RWMutex
 )
-//TODO: break into smaller files after 
+
+// TODO: break into smaller files after
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("welcome to kosmo! your dev first, self-hosted deployment tool")
@@ -62,6 +63,8 @@ func main() {
 		handleDeploy(args)
 	case "logs":
 		handleLogs(args)
+	case "rollback":
+		handleRollback(args)
 	default:
 		fmt.Printf("kosmo: unknown command '%s'\n", cmd)
 		os.Exit(1)
@@ -348,13 +351,108 @@ func handleLogs(args []string) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	if err := cmd.Run(); err!= nil {
+	if err := cmd.Run(); err != nil {
 		fmt.Printf("failed to tail logs: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func parseArgs(args []string, key1,key2 string) (string, string) {
+func handleRollback(args []string) {
+	app, _ := parseArgs(args, "--app", "")
+	if app == "" {
+		fmt.Println("usage: kosmo rollback --app <app-name>")
+		os.Exit(1)
+	}
+
+	appsMutex.Lock()
+	defer appsMutex.Unlock()
+
+	appInfo, exists := runningApps[app]
+	if !exists {
+		fmt.Printf("app '%s' is not running\n", app)
+		os.Exit(1)
+	}
+
+	if appInfo.PreviousPath == "" {
+		fmt.Printf("no previous version found for app '%s'\n", app)
+		os.Exit(1)
+	}
+
+	// check if previous build still exists
+	if _, err := os.Stat(appInfo.PreviousPath); os.IsNotExist(err) {
+		fmt.Printf("previous build not found: %s\n", appInfo.PreviousPath)
+		os.Exit(1)
+	}
+
+	// check if previous binary exists
+	prevBinary := filepath.Join(appInfo.PreviousPath, "app")
+	if _, err := os.Stat(prevBinary); os.IsNotExist(err) {
+		fmt.Printf("previous binary not found: %s\n", prevBinary)
+		os.Exit(1)
+	}
+
+	fmt.Printf("rolling back app '%s' to previous version...\n", app)
+
+	// graceful shutdown current version
+	if appInfo.Process != nil {
+		gracefulShutdown(appInfo.Process)
+	}
+
+	// start previous version
+	runCmd := exec.Command(prevBinary)
+	runCmd.Dir = appInfo.PreviousPath
+	runCmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", appInfo.Port))
+
+	// use previous log file
+	prevLogFile := appInfo.PreviousLog
+	if prevLogFile == "" {
+		prevLogFile = filepath.Join(appInfo.PreviousPath, "app.log")
+	}
+
+	f, err := os.OpenFile(prevLogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Printf("failed to open previous log file: %v\n", err)
+		os.Exit(1)
+	}
+	runCmd.Stdout = f
+	runCmd.Stderr = f
+
+	runCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := runCmd.Start(); err != nil {
+		fmt.Printf("failed to start previous version: %v\n", err)
+		os.Exit(1)
+	}
+
+	// health check previous version
+	healthURL := fmt.Sprintf("http://localhost:%d/health", appInfo.Port)
+	if !waitForHealth(healthURL, 30) {
+		runCmd.Process.Kill()
+		fmt.Println("previous version failed health check")
+		os.Exit(1)
+	}
+
+	// update app info - swap current and previous
+	oldPath := appInfo.Path
+	oldLog := appInfo.LogFile
+	oldVersion := appInfo.Version
+
+	appInfo.Path = appInfo.PreviousPath
+	appInfo.LogFile = appInfo.PreviousLog
+	appInfo.Version = "rollback-" + oldVersion
+	appInfo.Process = runCmd.Process
+	appInfo.PID = runCmd.Process.Pid
+	appInfo.PreviousPath = oldPath
+	appInfo.PreviousLog = oldLog
+
+	runningApps[app] = appInfo
+	saveState()
+
+	fmt.Printf("rollback successful! app '%s' running on port %d\n", app, appInfo.Port)
+	fmt.Printf("logs: %s\n", appInfo.LogFile)
+}
+
+func parseArgs(args []string, key1, key2 string) (string, string) {
 	var val1, val2 string
 	for i, arg := range args {
 		if (arg == key1 || (key2 != "" && arg == key2)) && i+1 < len(args) {
@@ -456,16 +554,18 @@ func loadState() {
 			continue
 		}
 		if proc.Signal(syscall.Signal(0)) != nil {
-			continue 
+			continue
 		}
 
 		runningApps[name] = &AppInfo{
-			Process: proc,
-			PID:     info.PID,
-			Port:    info.Port,
-			Version: info.Version,
-			Path:    info.Path,
-			LogFile: info.LogFile,
+			Process:      proc,
+			PID:          info.PID,
+			Port:         info.Port,
+			Version:      info.Version,
+			Path:         info.Path,
+			LogFile:      info.LogFile,
+			PreviousPath: info.PreviousPath,
+			PreviousLog:  info.PreviousLog,
 		}
 
 		if info.Port > maxPort {
@@ -481,11 +581,13 @@ func saveState() {
 	state := make(map[string]AppInfo)
 	for name, app := range runningApps {
 		state[name] = AppInfo{
-			PID:     app.PID,
-			Port:    app.Port,
-			Version: app.Version,
-			Path:    app.Path,
-			LogFile: app.LogFile,
+			PID:          app.PID,
+			Port:         app.Port,
+			Version:      app.Version,
+			Path:         app.Path,
+			LogFile:      app.LogFile,
+			PreviousPath: app.PreviousPath,
+			PreviousLog:  app.PreviousLog,
 		}
 	}
 	appsMutex.RUnlock()
@@ -508,12 +610,14 @@ func saveState() {
 }
 
 type AppInfo struct {
-	Process *os.Process `json:"-"`
-	PID     int         `json:"pid"`
-	Port    int         `json:"port"`
-	Version string      `json:"version"`
-	Path    string      `json:"path"`
-	LogFile string      `json:"log_file"`
+	Process      *os.Process `json:"-"`
+	PID          int         `json:"pid"`
+	Port         int         `json:"port"`
+	Version      string      `json:"version"`
+	Path         string      `json:"path"`
+	LogFile      string      `json:"log_file"`
+	PreviousPath string      `json:"previous_path"`
+	PreviousLog  string      `json:"previous_log"`
 }
 
 func findAvailablePort(startPort int) int {
@@ -584,7 +688,7 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	// verify client authentication using the new system
 	if err := verifyClientAuth(pubB64, sigB64, ts, app, body); err != nil {
 		fmt.Printf("authentication failed: %v\n", err)
-		http.Error(w, "authentication failed: "+err.Error(), http.StatusForbidden)
+		http.Error(w, fmt.Sprintf("authentication failed: %v", err), http.StatusForbidden)
 		return
 	}
 	fmt.Printf("authenticated deploy from client: %s ...\n", pubB64[:16])
@@ -600,7 +704,7 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	// decompress and untar the request (using the body we already read)
 	gzr, err := gzip.NewReader(bytes.NewReader(body))
 	if err != nil {
-		http.Error(w, "failed to read gzip: "+err.Error(), 500)
+		http.Error(w, fmt.Sprintf("failed to read gzip: %v", err), 500)
 		return
 	}
 	defer gzr.Close()
@@ -612,7 +716,7 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if err != nil {
-			http.Error(w, "failed to read tar: "+err.Error(), 500)
+			http.Error(w, fmt.Sprintf("failed to read tar: %v", err), 500)
 			return
 		}
 
@@ -628,21 +732,21 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 			os.MkdirAll(target, os.FileMode(hdr.Mode))
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				http.Error(w, "failed to create directory: "+err.Error(), 500)
+				http.Error(w, fmt.Sprintf("failed to create directory: %v", err), 500)
 				return
 			}
 			f, err := os.Create(target)
 			if err != nil {
-				http.Error(w, "create file error: "+err.Error(), 500)
+				http.Error(w, fmt.Sprintf("create file error: %v", err), 500)
 				return
 			}
 			if _, err := io.Copy(f, tr); err != nil {
 				f.Close()
-				http.Error(w, "failed to write file: "+err.Error(), 500)
+				http.Error(w, fmt.Sprintf("failed to write file: %v", err), 500)
 				return
 			}
 			if err := f.Close(); err != nil {
-				http.Error(w, "failed to close file: "+err.Error(), 500)
+				http.Error(w, fmt.Sprintf("failed to close file: %v", err), 500)
 				return
 			}
 		}
@@ -657,7 +761,7 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("building app...")
 	if err := buildCmd.Run(); err != nil {
 		fmt.Printf("build failed: %v\n", err)
-		http.Error(w, "build failed: "+err.Error(), 500)
+		http.Error(w, fmt.Sprintf("build failed: %v", err), 500)
 		return
 	}
 	fmt.Println("build done, starting app...")
@@ -679,7 +783,7 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	logFile := filepath.Join(appBuildDir, "app.log")
 	f, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
-		http.Error(w, "failed to create app log file: "+err.Error(), 500)
+		http.Error(w, fmt.Sprintf("failed to create app log file: %v", err), 500)
 		return
 	}
 
@@ -694,7 +798,7 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 
 	err = runCmd.Start()
 	if err != nil {
-		http.Error(w, "failed to start app: "+err.Error(), 500)
+		http.Error(w, fmt.Sprintf("failed to start app: %v", err), 500)
 		return
 	}
 
@@ -724,13 +828,23 @@ func handleDeployHTTP(w http.ResponseWriter, r *http.Request) {
 	//switch traffic
 	appsMutex.Lock()
 	version := fmt.Sprintf("%d", timestamp)
+
+	// preserve previous version info if it exists
+	var prevPath, prevLog string
+	if oldApp != nil {
+		prevPath = oldApp.Path
+		prevLog = oldApp.LogFile
+	}
+
 	runningApps[app] = &AppInfo{
-		Process: runCmd.Process,
-		PID:     runCmd.Process.Pid,
-		Port:    newPort,
-		Version: version,
-		Path:    appBuildDir,
-		LogFile: logFile,
+		Process:      runCmd.Process,
+		PID:          runCmd.Process.Pid,
+		Port:         newPort,
+		Version:      version,
+		Path:         appBuildDir,
+		LogFile:      logFile,
+		PreviousPath: prevPath,
+		PreviousLog:  prevLog,
 	}
 	appsMutex.Unlock()
 
