@@ -15,8 +15,10 @@ func init() {
 var authCmd = &cobra.Command{Use: "auth", Short: "Auth commands"}
 
 var authLoginCmd = &cobra.Command{
-	Use:   "login",
-	Short: "Configure client keys for a server",
+	Use:     "login",
+	Short:   "Configure client keys for a server",
+	Long:    "Generate a client keypair and write local config for a target server.",
+	Example: `  kosmo auth login --server http://127.0.0.1:8080 --key KOSMO-XXXX`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server, _ := cmd.Flags().GetString("server")
 		key, _ := cmd.Flags().GetString("key")

@@ -18,11 +18,13 @@ func init() {
 var appsCmd = &cobra.Command{
 	Use:   "apps",
 	Short: "Manage running apps",
+	Long:  "List and operate on running apps deployed by kosmo.",
 }
 
 var listAppsCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List apps",
+	Long:  "Show all known apps and their status, ports, and pids.",
 	Run: func(cmd *cobra.Command, args []string) {
 		commands.Apps()
 	},
@@ -31,6 +33,9 @@ var listAppsCmd = &cobra.Command{
 var logsCmd = &cobra.Command{
 	Use:   "logs",
 	Short: "Tail app logs",
+	Long:  "Tail the stdout/stderr log file for a running app.",
+	Example: `  kosmo apps logs --app myapp
+  kosmo apps logs myapp`,
 	Run: func(cmd *cobra.Command, args []string) {
 		app, _ := cmd.Flags().GetString("app")
 		argv := []string{}
@@ -50,6 +55,7 @@ var logsCmd = &cobra.Command{
 var rollbackCmd = &cobra.Command{
 	Use:   "rollback",
 	Short: "Rollback app to previous version",
+	Long:  "Stop current app and start the previous build if available.",
 	Run: func(cmd *cobra.Command, args []string) {
 		app, _ := cmd.Flags().GetString("app")
 		argv := []string{}
@@ -65,6 +71,7 @@ var rollbackCmd = &cobra.Command{
 var restartCmd = &cobra.Command{
 	Use:   "restart",
 	Short: "Restart an app",
+	Long:  "Stop and start the current app build using the same port.",
 	Run: func(cmd *cobra.Command, args []string) {
 		app, _ := cmd.Flags().GetString("app")
 		argv := []string{}

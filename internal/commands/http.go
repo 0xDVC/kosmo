@@ -51,7 +51,10 @@ func deploy(w http.ResponseWriter, r *http.Request) {
 	timestamp := time.Now().Unix()
 	appBuildDir := filepath.Join(buildsDir, fmt.Sprintf("%s-%d", app, timestamp))
 
-	os.MkdirAll(appBuildDir, 0755)
+	if err := os.MkdirAll(appBuildDir, 0755); err != nil {
+		http.Error(w, fmt.Sprintf("failed to create build directory: %v", err), 500)
+		return
+	}
 
 	gzr, err := gzip.NewReader(bytes.NewReader(body))
 	if err != nil {
@@ -79,7 +82,10 @@ func deploy(w http.ResponseWriter, r *http.Request) {
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			os.MkdirAll(target, os.FileMode(hdr.Mode))
+			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)); err != nil {
+				http.Error(w, fmt.Sprintf("failed to create directory: %v", err), 500)
+				return
+			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 				http.Error(w, fmt.Sprintf("failed to create directory: %v", err), 500)

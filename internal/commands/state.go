@@ -159,7 +159,9 @@ func getLogFile() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		logDir := ".kosmo"
-		os.MkdirAll(logDir, 0755)
+		if err := os.MkdirAll(logDir, 0755); err != nil {
+			return "kosmo.log"
+		}
 		return filepath.Join(logDir, "kosmo.log")
 	}
 	logDir := filepath.Join(home, ".kosmo")
@@ -203,7 +205,9 @@ func setupDaemonStdio() {
 		if err := unix.Dup2(int(devNull.Fd()), int(os.Stdin.Fd())); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to redirect stdin: %v\n", err)
 		}
-		devNull.Close()
+		if err := devNull.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close /dev/null: %v\n", err)
+		}
 	}
 
 	logFile := getLogFile()
@@ -214,16 +218,22 @@ func setupDaemonStdio() {
 	}
 	if err := unix.Dup2(int(f.Fd()), int(os.Stdout.Fd())); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to redirect stdout: %v\n", err)
-		f.Close()
+		if err := f.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close log file: %v\n", err)
+		}
 		return
 	}
 	if err := unix.Dup2(int(f.Fd()), int(os.Stderr.Fd())); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to redirect stderr: %v\n", err)
-		f.Close()
+		if err := f.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close log file: %v\n", err)
+		}
 		return
 	}
 
-	f.Close()
+	if err := f.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to close log file: %v\n", err)
+	}
 }
 
 func readPID(pidFile string) int {

@@ -18,11 +18,18 @@ func init() {
 	rootCmd.AddCommand(deployCmd)
 }
 
-var serverCmd = &cobra.Command{Use: "server", Short: "Server commands"}
+var serverCmd = &cobra.Command{
+	Use:   "server",
+	Short: "Server commands",
+	Long:  "Manage the kosmo server process on this host.",
+}
 
 var serverSetupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Initialize server keys and config",
+	Long:  "Generate server ed25519 keys and create the server allowlist config.",
+	Example: `  kosmo server setup
+  kosmo server up --port 8080`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// exposed setup via cobra; uses auth.InitServer under the hood
 		auth.InitServer()
@@ -32,6 +39,9 @@ var serverSetupCmd = &cobra.Command{
 var serverUpCmd = &cobra.Command{
 	Use:   "up",
 	Short: "Start kosmo server",
+	Long:  "Start the kosmo HTTP server that receives deployments.",
+	Example: `  kosmo server up
+  kosmo server up -p 8081`,
 	Run: func(cmd *cobra.Command, args []string) {
 		port, _ := cmd.Flags().GetInt("port")
 		var argv []string
@@ -45,6 +55,7 @@ var serverUpCmd = &cobra.Command{
 var serverDownCmd = &cobra.Command{
 	Use:   "down",
 	Short: "Stop kosmo server",
+	Long:  "Stop the kosmo server daemon.",
 	Run: func(cmd *cobra.Command, args []string) {
 		commands.Down()
 	},
@@ -53,14 +64,17 @@ var serverDownCmd = &cobra.Command{
 var serverStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show server status",
+	Long:  "Show whether the kosmo server is running.",
 	Run: func(cmd *cobra.Command, args []string) {
 		commands.Status()
 	},
 }
 
 var deployCmd = &cobra.Command{
-	Use:   "deploy",
-	Short: "Deploy current app to the server",
+	Use:     "deploy",
+	Short:   "Deploy current app to the server",
+	Long:    "Tar, sign, and upload the current directory to the kosmo server.",
+	Example: `  kosmo deploy --server http://127.0.0.1:8080`,
 	Run: func(cmd *cobra.Command, args []string) {
 		server, _ := cmd.Flags().GetString("server")
 		var argv []string

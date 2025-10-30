@@ -34,7 +34,10 @@ func Init() {
 	buildsDir := filepath.Join(kosmoDir, "builds")
 
 	fmt.Println("initializing kosmo...")
-	os.MkdirAll(buildsDir, 0755)
+	if err := os.MkdirAll(buildsDir, 0755); err != nil {
+		fmt.Printf("failed to create builds dir: %v\n", err)
+		os.Exit(1)
+	}
 
 	fmt.Println("kosmo initialized.")
 	fmt.Println("-- run 'kosmo deploy --server http://<ip>:8080'")
@@ -90,7 +93,9 @@ func Up(args []string) {
 	fmt.Printf("starting HTTP server on :%d\n", port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
 		fmt.Printf("server failed: %v\n", err)
-		os.Remove(pidFile)
+		if err := os.Remove(pidFile); err != nil {
+			fmt.Printf("failed to remove PID file: %v\n", err)
+		}
 		os.Exit(1)
 	}
 }
@@ -132,7 +137,9 @@ func Down() {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	os.Remove(pidFile)
+	if err := os.Remove(pidFile); err != nil {
+		fmt.Printf("warning: failed to remove PID file: %v\n", err)
+	}
 	fmt.Println("kosmo stopped")
 }
 
@@ -148,7 +155,9 @@ func Status() {
 		fmt.Printf("kosmo is running: (pid: %d)\n", pid)
 	} else {
 		fmt.Println("kosmo is not running")
-		os.Remove(pidFile)
+		if err := os.Remove(pidFile); err != nil {
+			fmt.Printf("warning: failed to remove stale PID file: %v\n", err)
+		}
 	}
 }
 
