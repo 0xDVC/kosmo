@@ -22,9 +22,15 @@ Supported shells: bash, zsh, fish
 
 Detects $SHELL and installs completion to the appropriate location.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		shell := detectShell()
+		var shell string
+		if len(args) > 0 {
+			shell = args[0]
+		} else {
+			shell = detectShell()
+		}
+
 		if shell == "" {
-			fmt.Println("could not detect shell; set SHELL env var or pass shell explicitly")
+			fmt.Println("could not detect shell; set SHELL or pass shell explicitly")
 			fmt.Println("usage: kosmo completion [bash|zsh|fish]")
 			os.Exit(1)
 		}
@@ -33,13 +39,12 @@ Detects $SHELL and installs completion to the appropriate location.`,
 			fmt.Printf("failed to install completion: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("completion installed for %s\n", shell)
-		fmt.Println("restart your shell or source the completion file to enable")
 	},
 	ValidArgs: []string{"bash", "zsh", "fish"},
 	Args:      cobra.MaximumNArgs(1),
 }
 
+// parse $SHELL to figure out what shell we are running
 func detectShell() string {
 	shellPath := os.Getenv("SHELL")
 	if shellPath == "" {
@@ -54,6 +59,7 @@ func detectShell() string {
 	}
 }
 
+// write completion script to the right place for each shell
 func installCompletion(shell string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -65,7 +71,7 @@ func installCompletion(shell string) error {
 
 	switch shell {
 	case "bash":
-		// Try to use bash_completion.d if available
+		// try system dirs first, fall back to home if we cant write there
 		if _, err := os.Stat("/etc/bash_completion.d"); err == nil {
 			path = "/etc/bash_completion.d/kosmo"
 		} else if _, err := os.Stat("/usr/local/etc/bash_completion.d"); err == nil {
@@ -77,7 +83,7 @@ func installCompletion(shell string) error {
 			return rootCmd.GenBashCompletion(f)
 		}
 	case "zsh":
-		// Check if .zsh exists, create if not
+		// zsh needs completion files in fpath, ~/.zsh is added to fpath below
 		zshDir := filepath.Join(home, ".zsh")
 		if err := os.MkdirAll(zshDir, 0755); err != nil {
 			return err
@@ -99,9 +105,8 @@ func installCompletion(shell string) error {
 		return fmt.Errorf("unsupported shell: %s", shell)
 	}
 
-	// Check if we can write to system paths, otherwise use home
+	// for bash, check if we can write to system paths, otherwise use home
 	if strings.HasPrefix(path, "/etc/") || strings.HasPrefix(path, "/usr/") {
-		// Try system path, fallback to home on permission error
 		f, err := os.Create(path)
 		if err != nil {
 			if shell == "bash" {
@@ -112,29 +117,73 @@ func installCompletion(shell string) error {
 		}
 	}
 
-	f, err := os.Create(path)
+	// bail if already installed
+	alreadyInstalled := false
+	if _, err := os.Stat(path); err == nil {
+		alreadyInstalled = true
+	}
+
+	if !alreadyInstalled {
+		f, err := os.Create(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		if err := genFunc(f); err != nil {
+			return err
+		}
+		fmt.Printf("completion installed: %s\n", path)
+	}
+
+	// always ensure zsh config is set up, even if completion file already exists
+	if shell == "zsh" {
+		zshrc := filepath.Join(home, ".zshrc")
+		if err := ensureZshConfig(zshrc); err != nil {
+			fmt.Printf("warning: could not update .zshrc: %v\n", err)
+		}
+	}
+
+	if alreadyInstalled {
+		fmt.Println("completion already installed")
+	}
+	fmt.Println("restart your shell to enable")
+	return nil
+}
+
+// make sure .zshrc has fpath and compinit set up for completion to work
+// zsh won't load completions unless ~/.zsh is in fpath and compinit is called
+func ensureZshConfig(zshrc string) error {
+	data, err := os.ReadFile(zshrc)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	content := string(data)
+	fpathLine := "fpath=(~/.zsh $fpath)"
+	compLine := "autoload -U compinit; compinit"
+
+	needsFpath := !strings.Contains(content, "fpath=(~/.zsh")
+	needsComp := !strings.Contains(content, "autoload -U compinit")
+
+	if !needsFpath && !needsComp {
+		return nil
+	}
+
+	f, err := os.OpenFile(zshrc, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	if err := genFunc(f); err != nil {
-		return err
+	if needsFpath || needsComp {
+		f.WriteString("\n# kosmo completion\n")
 	}
-
-	fmt.Printf("wrote completion to: %s\n", path)
-
-	// Provide shell-specific instructions
-	switch shell {
-	case "bash":
-		fmt.Println("\nTo enable completions now, run:")
-		fmt.Printf("  source %s\n", path)
-	case "zsh":
-		fmt.Println("\nAdd to your ~/.zshrc if not already present:")
-		fmt.Println("  fpath=(~/.zsh $fpath)")
-		fmt.Println("  autoload -U compinit; compinit")
-	case "fish":
-		fmt.Println("\nCompletions will be loaded automatically on restart")
+	if needsFpath {
+		f.WriteString(fpathLine + "\n")
+	}
+	if needsComp {
+		f.WriteString(compLine + "\n")
 	}
 
 	return nil

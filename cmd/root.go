@@ -27,6 +27,7 @@ Generate shell completion with: kosmo completion <shell>`,
 }
 
 func init() {
+	// install completion on first run in the background
 	go InstallCompletion()
 }
 

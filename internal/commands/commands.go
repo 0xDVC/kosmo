@@ -60,6 +60,7 @@ func Up(args []string) {
 		return
 	}
 
+	// if we're in a tty and not already daemonized, fork and exit parent
 	if os.Getenv("KOSMO_DAEMON") == "" {
 		if shouldDaemonize() {
 			if err := daemonize(); err != nil {
@@ -70,6 +71,7 @@ func Up(args []string) {
 		}
 	}
 
+	// if we should be a daemon, redirect stdio to logfile
 	if shouldDaemonize() {
 		setupDaemonStdio()
 	}
@@ -79,6 +81,7 @@ func Up(args []string) {
 		fmt.Printf("port %d in use, using %d instead\n", startPort, port)
 	}
 
+	// restore any apps that were running before we crashed/restarted
 	loadState()
 
 	if err := writePID(pidFile, os.Getpid()); err != nil {
@@ -189,6 +192,7 @@ func Deploy(args []string) {
 		os.Exit(1)
 	}
 
+	// sign the tarball with our ed25519 private key
 	timestamp := time.Now().Unix()
 	authReq := auth.AuthRequest{
 		App:       app,
@@ -283,13 +287,12 @@ func Rollback(args []string) {
 		os.Exit(1)
 	}
 
-	// check if previous build still exists
+	// make sure the old build directory and binary still exist
 	if _, err := os.Stat(appInfo.PreviousPath); os.IsNotExist(err) {
 		fmt.Printf("previous build not found: %s\n", appInfo.PreviousPath)
 		os.Exit(1)
 	}
 
-	// check if previous binary exists
 	prevBinary := filepath.Join(appInfo.PreviousPath, "app")
 	if _, err := os.Stat(prevBinary); os.IsNotExist(err) {
 		fmt.Printf("previous binary not found: %s\n", prevBinary)
@@ -336,7 +339,7 @@ func Rollback(args []string) {
 		os.Exit(1)
 	}
 
-	// update app info - swap current and previous
+	// swap current and previous versions
 	oldPath := appInfo.Path
 	oldLog := appInfo.LogFile
 	oldVersion := appInfo.Version
@@ -445,7 +448,6 @@ func Restart(args []string) {
 		os.Exit(1)
 	}
 
-	// health check
 	healthURL := fmt.Sprintf("http://localhost:%d/health", appInfo.Port)
 	if !waitForHealth(healthURL, 30) {
 		runCmd.Process.Kill()

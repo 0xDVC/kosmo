@@ -14,7 +14,7 @@ func main() {
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Hello from kosmo-deployed app! Time: %s\n", time.Now().Format(time.RFC3339))
+		fmt.Fprintf(w, "hello world! Time: %s\n", time.Now().Format(time.RFC3339))
 	})
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

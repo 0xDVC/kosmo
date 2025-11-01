@@ -37,6 +37,7 @@ var logsCmd = &cobra.Command{
 	Example: `  kosmo apps logs --app myapp
   kosmo apps logs myapp`,
 	Run: func(cmd *cobra.Command, args []string) {
+		// accept both --app flag and positional arg
 		app, _ := cmd.Flags().GetString("app")
 		argv := []string{}
 		if app != "" {

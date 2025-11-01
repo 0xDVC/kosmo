@@ -46,10 +46,15 @@ func deploy(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Info().Msgf("authenticated deploy from client: %s", pubB64[:16])
 
-	kosmoDir := ".kosmo"
-	buildsDir := filepath.Join(kosmoDir, "builds")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to get home dir: %v", err), 500)
+		return
+	}
+	kosmoDir := filepath.Join(home, ".kosmo")
+	buildsDir := filepath.Join(kosmoDir, "apps")
 	timestamp := time.Now().Unix()
-	appBuildDir := filepath.Join(buildsDir, fmt.Sprintf("%s-%d", app, timestamp))
+	appBuildDir := filepath.Join(buildsDir, app, fmt.Sprintf("%d", timestamp))
 
 	if err := os.MkdirAll(appBuildDir, 0755); err != nil {
 		http.Error(w, fmt.Sprintf("failed to create build directory: %v", err), 500)
@@ -74,6 +79,7 @@ func deploy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// prevent path traversal attacks
 		target := filepath.Join(appBuildDir, filepath.Clean(hdr.Name))
 		if !strings.HasPrefix(target, appBuildDir) {
 			http.Error(w, "path traversal attempt", 400)
@@ -157,6 +163,7 @@ func deploy(w http.ResponseWriter, r *http.Request) {
 	oldApp, exists := runningApps[app]
 	appsMutex.Unlock()
 
+	// wait for /health endpoint to respond, kill if it doesn't come up
 	log.Info().Msgf("checking on port %d", newPort)
 	healthURL := fmt.Sprintf("http://localhost:%d/health", newPort)
 	if !waitForHealth(healthURL, 30) {
@@ -171,6 +178,7 @@ func deploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// new version is healthy, update state and kill old version
 	appsMutex.Lock()
 	version := fmt.Sprintf("%d", timestamp)
 

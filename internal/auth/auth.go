@@ -53,6 +53,7 @@ func InitServer() {
 	serverPubKeyFile := filepath.Join(keyDir, "server_ed25519.pub")
 	serverPrivKeyFile := filepath.Join(keyDir, "server_ed25519")
 
+	// if keys already exist, just print the token
 	if _, err := os.Stat(serverPrivKeyFile); err == nil {
 		pub, err := os.ReadFile(serverPubKeyFile)
 		if err != nil {
@@ -60,7 +61,9 @@ func InitServer() {
 			os.Exit(1)
 		}
 		pubStr := base64.StdEncoding.EncodeToString(pub)
-		fmt.Printf("Server token: KOSMO-%s\n", pubStr)
+		fmt.Printf("kosmo server already initialized.\n")
+		fmt.Printf("\nServer public key:\n")
+		fmt.Printf("KOSMO-%s\n", pubStr)
 		return
 	}
 
@@ -92,12 +95,13 @@ func InitServer() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("kosmo setup complete.\n")
-	fmt.Printf("Server token (give this to clients):\n")
+	fmt.Printf("kosmo server initialized.\n")
+	fmt.Printf("\nServer public key (give this to clients):\n")
 	fmt.Printf("KOSMO-%s\n", pubStr)
 	fmt.Printf("\nNext steps:\n")
-	fmt.Printf("1. start the server: kosmo up\n")
-	fmt.Printf("2. add clients: kosmo add-client --pubkey <client-pubkey>\n")
+	fmt.Printf("1. start the server: kosmo server up\n")
+	fmt.Printf("2. clients run: kosmo auth login --server <url> --key KOSMO-%s\n", pubStr[:16]+"...")
+	fmt.Printf("3. add client keys: kosmo clients add <client-pubkey>\n")
 }
 
 func InitClient(serverURL, serverKey string) {
@@ -140,6 +144,10 @@ func InitClient(serverURL, serverKey string) {
 
 	fmt.Printf("kosmo client configured. ready to deploy.\n")
 	fmt.Printf("server: %s\n", serverURL)
+	fmt.Printf("\nYour client public key (give this to the server admin):\n")
+	fmt.Printf("KOSMO-%s\n", cfg.ClientPub)
+	fmt.Printf("\nOn the server, run:\n")
+	fmt.Printf("  kosmo clients add KOSMO-%s\n", cfg.ClientPub)
 }
 
 func LoadServerConfig() (*ServerConfig, error) {
@@ -186,6 +194,7 @@ func Verify(clientPubKey, signature, timestamp, app string, payload []byte) erro
 		return fmt.Errorf("failed to load server config: %w", err)
 	}
 
+	// check client is in allowlist
 	allowed := false
 	for _, allowedClient := range config.AllowedClients {
 		if allowedClient == clientPubKey {
@@ -213,6 +222,7 @@ func Verify(clientPubKey, signature, timestamp, app string, payload []byte) erro
 		return fmt.Errorf("invalid timestamp: %w", err)
 	}
 
+	// reject requests older than 5min or from the future (clock skew tolerance 1min)
 	now := time.Now().Unix()
 	if now-reqTimestamp > 300 || reqTimestamp-now > 60 {
 		return ErrInvalidTimestamp
@@ -237,6 +247,8 @@ func Verify(clientPubKey, signature, timestamp, app string, payload []byte) erro
 }
 
 func AddClient(pubKey string) error {
+	pubKey = strings.TrimPrefix(pubKey, "KOSMO-")
+
 	config, err := LoadServerConfig()
 	if err != nil {
 		return err
@@ -253,6 +265,7 @@ func AddClient(pubKey string) error {
 }
 
 func RemoveClient(pubKey string) error {
+	pubKey = strings.TrimPrefix(pubKey, "KOSMO-")
 	config, err := LoadServerConfig()
 	if err != nil {
 		return err

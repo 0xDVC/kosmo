@@ -67,5 +67,3 @@ var clientsListCmd = &cobra.Command{
 		return nil
 	},
 }
-
-// removed top-level shortcuts to avoid duplication; use `kosmo clients ...`

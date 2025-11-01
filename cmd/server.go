@@ -31,7 +31,6 @@ var serverSetupCmd = &cobra.Command{
 	Example: `  kosmo server setup
   kosmo server up --port 8080`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// exposed setup via cobra; uses auth.InitServer under the hood
 		auth.InitServer()
 	},
 }
